@@ -28,6 +28,7 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 }
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
+const TOP_INSET = Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 10 : 14;
 const STORAGE_TASKS_KEY = '@reminder_quests_tasks_v4';
 const STORAGE_CATS_KEY = '@reminder_quests_cats_v4';
 
@@ -41,7 +42,25 @@ const WEEK_DAYS = [
   { id: 0, short: 'Sun' },
 ];
 
+const CALENDAR_WEEK_HEADERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
 const CATEGORY_COLORS = ['#B8E986', '#5AC8FA', '#AF52DE', '#FF9500', '#FF6B6B', '#20E3B2'];
+
+const WEIGHT_STAGES = [
+  { val: 1, mins: 30, label: 'Easy', sub: '1 slot • 30m focus', color: '#2CC990' },
+  { val: 2, mins: 90, label: 'Medium', sub: '2 slots • 1h 30m focus', color: '#5AC8FA' },
+  { val: 3, mins: 240, label: 'Hard', sub: '3 slots • 4h focus', color: '#FF9500' },
+];
+
+const URGENCY_STAGES = [
+  { val: 'low', idx: 1, label: 'Low', sub: '1 roll ticket', color: '#5AC8FA' },
+  { val: 'normal', idx: 2, label: 'Normal', sub: '3 roll tickets', color: '#C5A888' },
+  { val: 'high', idx: 3, label: 'High', sub: 'Priority roll • Orange dot', color: '#E87330' },
+];
 
 const getLocalDayStr = (date = new Date()) => {
   const y = date.getFullYear();
@@ -127,11 +146,18 @@ export default function App() {
   const [focusMinutesInput, setFocusMinutesInput] = useState(30);
   const [urgencyInput, setUrgencyInput] = useState('normal');
 
-  // Deadline states (3 suggestions + Custom)
+  // Deadline states (3 presets + Custom duration + Calendar & Time picker)
+  const [deadlineMode, setDeadlineMode] = useState('none'); // 'none' | 'preset' | 'custom' | 'calendar'
   const [deadlineHoursInput, setDeadlineHoursInput] = useState(null);
-  const [isCustomDeadline, setIsCustomDeadline] = useState(false);
   const [customDeadlineValue, setCustomDeadlineValue] = useState('');
   const [customDeadlineUnit, setCustomDeadlineUnit] = useState('hours');
+
+  // Calendar & Specific Time states
+  const [calViewYear, setCalViewYear] = useState(() => new Date().getFullYear());
+  const [calViewMonth, setCalViewMonth] = useState(() => new Date().getMonth());
+  const [calSelectedDateStr, setCalSelectedDateStr] = useState(() => getLocalDayStr(new Date()));
+  const [calHourInput, setCalHourInput] = useState('17');
+  const [calMinuteInput, setCalMinuteInput] = useState('00');
 
   // Recurrence states
   const [recurrenceTypeInput, setRecurrenceTypeInput] = useState('none');
@@ -191,7 +217,6 @@ export default function App() {
     const updated = tasks.map((t) => {
       let copy = { ...t };
 
-      // Automatically unselect all tasks in "Selected" at midnight (00:00) when day turns over
       if (copy.inDailyRoll) {
         if (!copy.selectedForDate) {
           copy.selectedForDate = todayStr;
@@ -538,6 +563,54 @@ export default function App() {
     saveTasks(updated);
   };
 
+  // Calendar & Specific Time computation helper
+  const computeCalendarTimestamp = (dateStr, hourStr, minStr) => {
+    if (!dateStr) return null;
+    const parts = dateStr.split('-').map(Number);
+    if (parts.length !== 3) return null;
+    const [y, m, d] = parts;
+    const h = Math.min(23, Math.max(0, parseInt(hourStr || '0', 10) || 0));
+    const min = Math.min(59, Math.max(0, parseInt(minStr || '0', 10) || 0));
+    const targetDate = new Date(y, m - 1, d, h, min, 0, 0);
+    return targetDate.getTime();
+  };
+
+  const adjustCalendarTime = (field, delta) => {
+    if (field === 'hour') {
+      const current = parseInt(calHourInput || '0', 10) || 0;
+      const next = (current + delta + 24) % 24;
+      setCalHourInput(String(next).padStart(2, '0'));
+    } else {
+      const current = parseInt(calMinuteInput || '0', 10) || 0;
+      const next = (current + delta + 60) % 60;
+      setCalMinuteInput(String(next).padStart(2, '0'));
+    }
+  };
+
+  const changeCalendarMonth = (delta) => {
+    configureSmoothLayout();
+    let nextM = calViewMonth + delta;
+    let nextY = calViewYear;
+    if (nextM > 11) {
+      nextM = 0;
+      nextY += 1;
+    } else if (nextM < 0) {
+      nextM = 11;
+      nextY -= 1;
+    }
+    setCalViewMonth(nextM);
+    setCalViewYear(nextY);
+  };
+
+  const selectQuickCalendarDay = (daysAhead) => {
+    configureSmoothLayout();
+    const target = new Date();
+    target.setDate(target.getDate() + daysAhead);
+    setCalViewYear(target.getFullYear());
+    setCalViewMonth(target.getMonth());
+    setCalSelectedDateStr(getLocalDayStr(target));
+  };
+
   // Open / Close Animated Bottom Sheet
   const animateOpenSheet = () => {
     sheetTranslateY.setValue(380);
@@ -581,6 +654,9 @@ export default function App() {
   };
 
   const openCreateSheet = () => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
     setEditingTaskId(null);
     setTitleInput('');
     setDescInput('');
@@ -589,10 +665,15 @@ export default function App() {
     setDifficultyInput(1);
     setFocusMinutesInput(30);
     setUrgencyInput('normal');
+    setDeadlineMode('none');
     setDeadlineHoursInput(null);
-    setIsCustomDeadline(false);
     setCustomDeadlineValue('');
     setCustomDeadlineUnit('hours');
+    setCalViewYear(tomorrow.getFullYear());
+    setCalViewMonth(tomorrow.getMonth());
+    setCalSelectedDateStr(getLocalDayStr(tomorrow));
+    setCalHourInput('17');
+    setCalMinuteInput('00');
     setRecurrenceTypeInput('none');
     setWeeklyQuotaInput(3);
     setTargetDaysInput([1, 3, 5]);
@@ -611,12 +692,29 @@ export default function App() {
     setDifficultyInput(task.difficulty || 1);
     setFocusMinutesInput(task.focusMinutes || 30);
     setUrgencyInput(task.urgency || 'normal');
-    const hrs = task.deadlineAt
-      ? Math.max(1, Math.round((task.deadlineAt - Date.now()) / 3600000))
-      : null;
-    setDeadlineHoursInput(hrs);
-    setIsCustomDeadline(hrs !== null && ![3, 24, 72].includes(hrs));
-    setCustomDeadlineValue(hrs !== null && ![3, 24, 72].includes(hrs) ? String(hrs) : '');
+
+    if (task.deadlineAt) {
+      const targetDate = new Date(task.deadlineAt);
+      setDeadlineMode('calendar');
+      setDeadlineHoursInput(null);
+      setCalViewYear(targetDate.getFullYear());
+      setCalViewMonth(targetDate.getMonth());
+      setCalSelectedDateStr(getLocalDayStr(targetDate));
+      setCalHourInput(String(targetDate.getHours()).padStart(2, '0'));
+      setCalMinuteInput(String(targetDate.getMinutes()).padStart(2, '0'));
+    } else {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      setDeadlineMode('none');
+      setDeadlineHoursInput(null);
+      setCalViewYear(tomorrow.getFullYear());
+      setCalViewMonth(tomorrow.getMonth());
+      setCalSelectedDateStr(getLocalDayStr(tomorrow));
+      setCalHourInput('17');
+      setCalMinuteInput('00');
+    }
+
+    setCustomDeadlineValue('');
     setCustomDeadlineUnit('hours');
     setRecurrenceTypeInput(task.recurrenceType || 'none');
     setWeeklyQuotaInput(task.weeklyQuota || 3);
@@ -639,18 +737,21 @@ export default function App() {
     const timestamp = Date.now();
     const createdDateStr = formatShortDate(new Date(timestamp));
 
-    let effectiveDeadlineHours = deadlineHoursInput;
-    if (isCustomDeadline && customDeadlineValue) {
+    let computedDeadline = null;
+    if (deadlineMode === 'preset' && deadlineHoursInput) {
+      computedDeadline = timestamp + deadlineHoursInput * 3600 * 1000;
+    } else if (deadlineMode === 'custom' && customDeadlineValue) {
       const parsed = parseFloat(customDeadlineValue);
       if (!isNaN(parsed) && parsed > 0) {
-        effectiveDeadlineHours =
-          customDeadlineUnit === 'days' ? parsed * 24 : parsed;
+        const hrs = customDeadlineUnit === 'days' ? parsed * 24 : parsed;
+        computedDeadline = timestamp + hrs * 3600 * 1000;
+      }
+    } else if (deadlineMode === 'calendar') {
+      const calTs = computeCalendarTimestamp(calSelectedDateStr, calHourInput, calMinuteInput);
+      if (calTs) {
+        computedDeadline = calTs;
       }
     }
-
-    const computedDeadline = effectiveDeadlineHours
-      ? timestamp + effectiveDeadlineHours * 3600 * 1000
-      : null;
 
     if (editingTaskId) {
       const updated = tasks.map((t) =>
@@ -664,7 +765,11 @@ export default function App() {
               focusMinutes: focusMinutesInput,
               urgency: urgencyInput,
               deadlineAt: computedDeadline,
-              deadlineCreatedAt: computedDeadline ? t.deadlineCreatedAt || timestamp : null,
+              deadlineCreatedAt: computedDeadline
+                ? t.deadlineAt === computedDeadline
+                  ? t.deadlineCreatedAt || timestamp
+                  : timestamp
+                : null,
               recurrenceType: recurrenceTypeInput,
               weeklyQuota: weeklyQuotaInput,
               targetDays: targetDaysInput,
@@ -965,17 +1070,15 @@ export default function App() {
   const backlogTasks = tasks.filter((t) => !t.completed);
   const completedTasks = tasks.filter((t) => t.completed);
 
-  // All pending tasks displayed in the "All" section on Home
   const allPendingTasks = sortTasksList(
     tasks.filter((t) => !t.completed && !t.completedToday)
   );
 
-  // Conditional "Selected" section tasks (only tasks selected or rolled for today)
   const selectedSectionTasks = sortTasksList(
     tasks.filter((t) => !t.completed && !t.completedToday && (t.inDailyRoll || t.isDoing))
   );
 
-  // Task Card Renderer (supports subtle highlight in "All" when task is also in "Selected")
+  // Task Card Renderer
   const renderTaskCard = (
     task,
     isGroupedItem = false,
@@ -993,7 +1096,7 @@ export default function App() {
     const isHighlightedInAll =
       sectionContext === 'all' && (task.inDailyRoll || task.isDoing) && !visualDone;
 
-    // Bottom Deadline Bar calculation
+    // Bottom Deadline Bar (Timebar) calculation
     let deadlinePercent = null;
     let deadlineColor = '#4A90E2';
     let deadlineLabel = '';
@@ -1002,13 +1105,14 @@ export default function App() {
       const total = Math.max(1, task.deadlineAt - start);
       const remaining = task.deadlineAt - now;
       deadlinePercent = Math.min(100, Math.max(0, (remaining / total) * 100));
+      const dueStr = formatDeadlineShort(new Date(task.deadlineAt));
       if (remaining <= 0) {
         deadlineColor = '#FF453A';
-        deadlineLabel = 'Overdue';
+        deadlineLabel = `Overdue (${dueStr})`;
       } else {
-        if (deadlinePercent < 20) deadlineColor = '#FF453A';
-        else if (deadlinePercent < 50) deadlineColor = '#E87330';
-        deadlineLabel = formatRemainingTime(remaining);
+        if (deadlinePercent < 20 || remaining <= 24 * 3600 * 1000) deadlineColor = '#FF453A';
+        else if (deadlinePercent < 50 || remaining <= 72 * 3600 * 1000) deadlineColor = '#E87330';
+        deadlineLabel = `${dueStr} • ${formatRemainingTime(remaining)}`;
       }
     }
 
@@ -1255,6 +1359,292 @@ export default function App() {
     });
   };
 
+  // Interactive 3-Stage Bar Component for Weight and Urgency
+  const renderThreeStageBar = ({ stages, activeIndex, onSelectStage }) => {
+    const fillPercent = activeIndex === 1 ? '33.33%' : activeIndex === 2 ? '66.66%' : '100%';
+    const currentStage = stages[activeIndex - 1] || stages[0];
+
+    return (
+      <View style={styles.stageBarContainer}>
+        {/* Progress Track & Nodes */}
+        <View style={styles.stageTrackWrapper}>
+          <View style={styles.stageTrackBackground}>
+            <View
+              style={[
+                styles.stageTrackFill,
+                { width: fillPercent, backgroundColor: currentStage.color },
+              ]}
+            />
+          </View>
+
+          <View style={styles.stageSegmentsOverlay}>
+            {stages.map((st, idx) => {
+              const stageNum = idx + 1;
+              const isReached = stageNum <= activeIndex;
+              const isCurrent = stageNum === activeIndex;
+              return (
+                <TouchableOpacity
+                  key={st.label}
+                  style={styles.stageTouchSegment}
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    configureSmoothLayout();
+                    onSelectStage(st);
+                  }}
+                >
+                  <View
+                    style={[
+                      styles.stageNodeCircle,
+                      isReached && {
+                        backgroundColor: currentStage.color,
+                        borderColor: currentStage.color,
+                      },
+                      isCurrent && styles.stageNodeCircleCurrent,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.stageNodeNumber,
+                        isReached && { color: '#121218', fontWeight: '800' },
+                      ]}
+                    >
+                      {stageNum}
+                    </Text>
+                  </View>
+                  <Text
+                    style={[
+                      styles.stageSegmentLabel,
+                      isCurrent && { color: '#FFFFFF', fontWeight: '700' },
+                    ]}
+                  >
+                    {st.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+
+        {/* Active Stage Summary Pill */}
+        <View style={styles.stageSummaryBox}>
+          <View style={[styles.stageSummaryDot, { backgroundColor: currentStage.color }]} />
+          <Text style={styles.stageSummaryText}>
+            <Text style={{ fontWeight: '700', color: '#FFF' }}>{currentStage.label}: </Text>
+            {currentStage.sub}
+          </Text>
+        </View>
+      </View>
+    );
+  };
+
+  // Interactive Mini-Calendar & Time Picker inside Schedule Panel
+  const renderCalendarAndTimePicker = () => {
+    const firstDayOfMonth = new Date(calViewYear, calViewMonth, 1).getDay();
+    const daysInMonth = new Date(calViewYear, calViewMonth + 1, 0).getDate();
+    const todayStr = getLocalDayStr(new Date());
+
+    const dayCells = [];
+    for (let i = 0; i < firstDayOfMonth; i++) {
+      dayCells.push(null);
+    }
+    for (let d = 1; d <= daysInMonth; d++) {
+      const mStr = String(calViewMonth + 1).padStart(2, '0');
+      const dStr = String(d).padStart(2, '0');
+      dayCells.push({ day: d, dateStr: `${calViewYear}-${mStr}-${dStr}` });
+    }
+
+    const previewTimestamp = computeCalendarTimestamp(
+      calSelectedDateStr,
+      calHourInput,
+      calMinuteInput
+    );
+    const previewRemainingMs = previewTimestamp ? previewTimestamp - now : null;
+
+    return (
+      <View style={styles.calendarCard}>
+        {/* Quick Day Shortcuts */}
+        <View style={styles.calQuickDaysRow}>
+          {[
+            { label: 'Today', offset: 0 },
+            { label: 'Tomorrow', offset: 1 },
+            { label: 'In 2 days', offset: 2 },
+            { label: 'Next week', offset: 7 },
+          ].map((qd) => {
+            const target = new Date();
+            target.setDate(target.getDate() + qd.offset);
+            const tStr = getLocalDayStr(target);
+            const active = calSelectedDateStr === tStr;
+            return (
+              <TouchableOpacity
+                key={qd.label}
+                style={[styles.calQuickChip, active && styles.smallChipActive]}
+                onPress={() => selectQuickCalendarDay(qd.offset)}
+              >
+                <Text style={styles.smallChipText}>{qd.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        {/* Month Navigation Header */}
+        <View style={styles.calMonthHeader}>
+          <TouchableOpacity onPress={() => changeCalendarMonth(-1)} style={styles.calNavBtn}>
+            <Text style={styles.calNavArrow}>‹</Text>
+          </TouchableOpacity>
+          <Text style={styles.calMonthTitle}>
+            {MONTH_NAMES[calViewMonth]} {calViewYear}
+          </Text>
+          <TouchableOpacity onPress={() => changeCalendarMonth(1)} style={styles.calNavBtn}>
+            <Text style={styles.calNavArrow}>›</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Week Days Header */}
+        <View style={styles.calWeekRow}>
+          {CALENDAR_WEEK_HEADERS.map((w, idx) => (
+            <Text key={idx} style={styles.calWeekHeaderText}>
+              {w}
+            </Text>
+          ))}
+        </View>
+
+        {/* Days Grid */}
+        <View style={styles.calDaysGrid}>
+          {dayCells.map((cell, idx) => {
+            if (!cell) {
+              return <View key={`empty-${idx}`} style={styles.calDayCell} />;
+            }
+            const isSelected = cell.dateStr === calSelectedDateStr;
+            const isToday = cell.dateStr === todayStr;
+            return (
+              <TouchableOpacity
+                key={cell.dateStr}
+                style={[
+                  styles.calDayCell,
+                  isToday && styles.calDayCellToday,
+                  isSelected && styles.calDayCellSelected,
+                ]}
+                onPress={() => setCalSelectedDateStr(cell.dateStr)}
+              >
+                <Text
+                  style={[
+                    styles.calDayText,
+                    isToday && { color: '#C5A888', fontWeight: '700' },
+                    isSelected && { color: '#121218', fontWeight: '800' },
+                  ]}
+                >
+                  {cell.day}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        {/* Specific Time Selector (HH : MM) */}
+        <View style={styles.calTimeSection}>
+          <View style={styles.calTimeHeaderRow}>
+            <Text style={styles.panelSubLabel}>Target Time (24h):</Text>
+            <View style={styles.calTimeStepperRow}>
+              <TouchableOpacity
+                style={styles.timeStepBtn}
+                onPress={() => adjustCalendarTime('hour', -1)}
+              >
+                <Text style={styles.timeStepBtnText}>−</Text>
+              </TouchableOpacity>
+              <TextInput
+                style={styles.calTimeBoxInput}
+                keyboardType="numeric"
+                maxLength={2}
+                value={calHourInput}
+                onChangeText={setCalHourInput}
+                onBlur={() => {
+                  const h = Math.min(23, Math.max(0, parseInt(calHourInput || '0', 10) || 0));
+                  setCalHourInput(String(h).padStart(2, '0'));
+                }}
+              />
+              <TouchableOpacity
+                style={styles.timeStepBtn}
+                onPress={() => adjustCalendarTime('hour', 1)}
+              >
+                <Text style={styles.timeStepBtnText}>＋</Text>
+              </TouchableOpacity>
+
+              <Text style={styles.calTimeColon}>:</Text>
+
+              <TouchableOpacity
+                style={styles.timeStepBtn}
+                onPress={() => adjustCalendarTime('min', -15)}
+              >
+                <Text style={styles.timeStepBtnText}>−</Text>
+              </TouchableOpacity>
+              <TextInput
+                style={styles.calTimeBoxInput}
+                keyboardType="numeric"
+                maxLength={2}
+                value={calMinuteInput}
+                onChangeText={setCalMinuteInput}
+                onBlur={() => {
+                  const m = Math.min(59, Math.max(0, parseInt(calMinuteInput || '0', 10) || 0));
+                  setCalMinuteInput(String(m).padStart(2, '0'));
+                }}
+              />
+              <TouchableOpacity
+                style={styles.timeStepBtn}
+                onPress={() => adjustCalendarTime('min', 15)}
+              >
+                <Text style={styles.timeStepBtnText}>＋</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Quick Time Presets */}
+          <View style={[styles.chipsWrapRow, { marginTop: 6 }]}>
+            {[
+              { h: '09', m: '00', label: '09:00' },
+              { h: '12', m: '00', label: '12:00' },
+              { h: '17', m: '00', label: '17:00' },
+              { h: '20', m: '00', label: '20:00' },
+              { h: '23', m: '59', label: '23:59' },
+            ].map((tp) => {
+              const active = calHourInput === tp.h && calMinuteInput === tp.m;
+              return (
+                <TouchableOpacity
+                  key={tp.label}
+                  style={[styles.calQuickChip, active && styles.smallChipActive]}
+                  onPress={() => {
+                    setCalHourInput(tp.h);
+                    setCalMinuteInput(tp.m);
+                  }}
+                >
+                  <Text style={styles.smallChipText}>{tp.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* Automatic Countdown Preview */}
+          {previewTimestamp && (
+            <View style={styles.calCountdownPreview}>
+              <Text style={styles.calCountdownPreviewText}>
+                ⏳ Due {formatDeadlineShort(new Date(previewTimestamp))} •{' '}
+                <Text
+                  style={{
+                    color: previewRemainingMs > 0 ? '#C5A888' : '#FF453A',
+                    fontWeight: '700',
+                  }}
+                >
+                  {previewRemainingMs > 0
+                    ? `${formatExactHoursAndMinutes(previewRemainingMs)} remaining`
+                    : 'Selected time is in the past'}
+                </Text>
+              </Text>
+            </View>
+          )}
+        </View>
+      </View>
+    );
+  };
+
   // Task Details Screen
   const renderDetailsScreen = () => {
     const task = tasks.find((t) => t.id === openedTaskId);
@@ -1350,7 +1740,7 @@ export default function App() {
               </Text>
               {task.deadlineAt && (
                 <Text style={styles.detailsMetaTagText}>
-                  • Deadline: {formatRemainingTime(task.deadlineAt - now)}
+                  • Due: {formatDeadlineShort(new Date(task.deadlineAt))} ({formatRemainingTime(task.deadlineAt - now)})
                 </Text>
               )}
               {task.recurrenceType === 'weekly' && (
@@ -1649,9 +2039,12 @@ export default function App() {
       >
         <SafeAreaView style={styles.safeArea}>
           <View style={styles.subScreenHeader}>
-            <TouchableOpacity onPress={() => navigateBack('home')} style={styles.backBtn}>
-              <Text style={styles.backArrow}>‹</Text>
-            </TouchableOpacity>
+            <View style={styles.rowCenter}>
+              <TouchableOpacity onPress={() => navigateBack('home')} style={styles.backBtn}>
+                <Text style={styles.backArrow}>‹</Text>
+              </TouchableOpacity>
+              <Text style={styles.subScreenTitle}>Search</Text>
+            </View>
           </View>
 
           <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -1704,7 +2097,7 @@ export default function App() {
             <View style={styles.searchBottomBar}>
               <TextInput
                 style={styles.searchBottomInput}
-                placeholder="Search"
+                placeholder="Search reminders..."
                 placeholderTextColor="#8E8E98"
                 value={searchQuery}
                 onChangeText={setSearchQuery}
@@ -1970,6 +2363,9 @@ export default function App() {
   }
 
   function renderAllModals() {
+    const activeUrgencyStage =
+      URGENCY_STAGES.find((u) => u.val === urgencyInput)?.idx || 2;
+
     return (
       <>
         {/* 3 Dots Menu (⋮) with One UI Scale + Opacity Animation */}
@@ -2243,288 +2639,302 @@ export default function App() {
 
               {/* Smoothly Expandable Option Panels */}
               {activeSheetPanel !== null && (
-                <View style={styles.sheetExpandedArea}>
-                  {activeSheetPanel === 'category' && (
-                    <View>
-                      <TouchableOpacity
-                        style={styles.sheetListRow}
-                        onPress={() => setCategoryInput('My reminders')}
-                      >
-                        <View style={styles.radioOuter}>
-                          {categoryInput === 'My reminders' && (
-                            <View style={styles.radioInner} />
-                          )}
-                        </View>
-                        <Text
-                          style={[
-                            styles.detailsCatIcon,
-                            { color: '#B8E986', marginRight: 12 },
-                          ]}
-                        >
-                          ☰
-                        </Text>
-                        <Text style={[styles.sheetListText, { flex: 1 }]}>My reminders</Text>
-                        <Text style={styles.sheetCountText}>
-                          {tasks.filter((t) => !t.completed && t.category === 'My reminders').length}
-                        </Text>
-                      </TouchableOpacity>
-
-                      <View style={styles.thinSheetDivider} />
-
-                      {categories.map((cat) => (
+                <ScrollView
+                  style={styles.sheetExpandedScroll}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                >
+                  <View style={styles.sheetExpandedArea}>
+                    {activeSheetPanel === 'category' && (
+                      <View>
                         <TouchableOpacity
-                          key={cat.id}
                           style={styles.sheetListRow}
-                          onPress={() => setCategoryInput(cat.name)}
+                          onPress={() => setCategoryInput('My reminders')}
                         >
                           <View style={styles.radioOuter}>
-                            {categoryInput === cat.name && <View style={styles.radioInner} />}
+                            {categoryInput === 'My reminders' && (
+                              <View style={styles.radioInner} />
+                            )}
                           </View>
-                          <View
+                          <Text
                             style={[
-                              styles.catDot,
-                              { backgroundColor: cat.color, marginRight: 12 },
+                              styles.detailsCatIcon,
+                              { color: '#B8E986', marginRight: 12 },
                             ]}
-                          />
-                          <Text style={[styles.sheetListText, { flex: 1 }]}>{cat.name}</Text>
+                          >
+                            ☰
+                          </Text>
+                          <Text style={[styles.sheetListText, { flex: 1 }]}>My reminders</Text>
                           <Text style={styles.sheetCountText}>
-                            {tasks.filter((t) => !t.completed && t.category === cat.name).length}
+                            {tasks.filter((t) => !t.completed && t.category === 'My reminders').length}
                           </Text>
                         </TouchableOpacity>
-                      ))}
 
-                      {inlineNewCatMode ? (
-                        <View style={styles.inlineCatRow}>
-                          <TextInput
-                            style={styles.inlineCatInput}
-                            placeholder="Category name..."
-                            placeholderTextColor="#787882"
-                            value={inlineNewCatName}
-                            onChangeText={setInlineNewCatName}
-                            autoFocus
-                          />
+                        <View style={styles.thinSheetDivider} />
+
+                        {categories.map((cat) => (
                           <TouchableOpacity
+                            key={cat.id}
+                            style={styles.sheetListRow}
+                            onPress={() => setCategoryInput(cat.name)}
+                          >
+                            <View style={styles.radioOuter}>
+                              {categoryInput === cat.name && <View style={styles.radioInner} />}
+                            </View>
+                            <View
+                              style={[
+                                styles.catDot,
+                                { backgroundColor: cat.color, marginRight: 12 },
+                              ]}
+                            />
+                            <Text style={[styles.sheetListText, { flex: 1 }]}>{cat.name}</Text>
+                            <Text style={styles.sheetCountText}>
+                              {tasks.filter((t) => !t.completed && t.category === cat.name).length}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+
+                        {inlineNewCatMode ? (
+                          <View style={styles.inlineCatRow}>
+                            <TextInput
+                              style={styles.inlineCatInput}
+                              placeholder="Category name..."
+                              placeholderTextColor="#787882"
+                              value={inlineNewCatName}
+                              onChangeText={setInlineNewCatName}
+                              autoFocus
+                            />
+                            <TouchableOpacity
+                              onPress={() => {
+                                if (!inlineNewCatName.trim()) return;
+                                configureSmoothLayout();
+                                const name = inlineNewCatName.trim();
+                                const newCat = {
+                                  id: Date.now().toString(),
+                                  name,
+                                  color:
+                                    CATEGORY_COLORS[categories.length % CATEGORY_COLORS.length],
+                                };
+                                saveCategories([...categories, newCat]);
+                                setCategoryInput(name);
+                                setInlineNewCatName('');
+                                setInlineNewCatMode(false);
+                              }}
+                            >
+                              <Text style={{ color: '#2CC990', fontWeight: '700' }}>Save</Text>
+                            </TouchableOpacity>
+                          </View>
+                        ) : (
+                          <TouchableOpacity
+                            style={styles.sheetListRow}
                             onPress={() => {
-                              if (!inlineNewCatName.trim()) return;
                               configureSmoothLayout();
-                              const name = inlineNewCatName.trim();
-                              const newCat = {
-                                id: Date.now().toString(),
-                                name,
-                                color:
-                                  CATEGORY_COLORS[categories.length % CATEGORY_COLORS.length],
-                              };
-                              saveCategories([...categories, newCat]);
-                              setCategoryInput(name);
-                              setInlineNewCatName('');
-                              setInlineNewCatMode(false);
+                              setInlineNewCatMode(true);
                             }}
                           >
-                            <Text style={{ color: '#2CC990', fontWeight: '700' }}>Save</Text>
+                            <Text style={styles.greenPlusIcon}>＋</Text>
+                            <Text style={styles.sheetListText}>Add category</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    )}
+
+                    {/* 3-Stage Interactive Bar for Difficulty / Weight */}
+                    {activeSheetPanel === 'weight' && (
+                      <View>
+                        <Text style={styles.panelSubLabel}>
+                          Difficulty / Weight (3-Stage Capacity Bar):
+                        </Text>
+                        {renderThreeStageBar({
+                          stages: WEIGHT_STAGES,
+                          activeIndex: difficultyInput,
+                          onSelectStage: (st) => {
+                            setDifficultyInput(st.val);
+                            setFocusMinutesInput(st.mins);
+                          },
+                        })}
+                      </View>
+                    )}
+
+                    {/* 3-Stage Interactive Bar for Urgency */}
+                    {activeSheetPanel === 'urgency' && (
+                      <View>
+                        <Text style={styles.panelSubLabel}>
+                          Urgency Level (3-Stage Priority Bar):
+                        </Text>
+                        {renderThreeStageBar({
+                          stages: URGENCY_STAGES,
+                          activeIndex: activeUrgencyStage,
+                          onSelectStage: (st) => {
+                            setUrgencyInput(st.val);
+                          },
+                        })}
+                      </View>
+                    )}
+
+                    {/* Schedule / Deadline Panel with Calendar & Time Picker */}
+                    {activeSheetPanel === 'schedule' && (
+                      <View>
+                        <Text style={styles.panelSubLabel}>
+                          Deadline (Quick Presets or Calendar & Time):
+                        </Text>
+                        <View style={styles.chipsWrapRow}>
+                          {[
+                            { hrs: 3, label: 'In 3 hours' },
+                            { hrs: 24, label: 'Tomorrow (24h)' },
+                            { hrs: 72, label: 'In 3 days' },
+                          ].map((p) => {
+                            const active =
+                              deadlineMode === 'preset' && deadlineHoursInput === p.hrs;
+                            return (
+                              <TouchableOpacity
+                                key={String(p.hrs)}
+                                style={[styles.smallChip, active && styles.smallChipActive]}
+                                onPress={() => {
+                                  configureSmoothLayout();
+                                  if (active) {
+                                    setDeadlineMode('none');
+                                    setDeadlineHoursInput(null);
+                                  } else {
+                                    setDeadlineMode('preset');
+                                    setDeadlineHoursInput(p.hrs);
+                                  }
+                                }}
+                              >
+                                <Text style={styles.smallChipText}>{p.label}</Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+
+                          <TouchableOpacity
+                            style={[
+                              styles.smallChip,
+                              deadlineMode === 'calendar' && styles.smallChipActive,
+                            ]}
+                            onPress={() => {
+                              configureSmoothLayout();
+                              setDeadlineMode(deadlineMode === 'calendar' ? 'none' : 'calendar');
+                            }}
+                          >
+                            <Text style={styles.smallChipText}>📅 Calendar & Time</Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            style={[
+                              styles.smallChip,
+                              deadlineMode === 'custom' && styles.smallChipActive,
+                            ]}
+                            onPress={() => {
+                              configureSmoothLayout();
+                              setDeadlineMode(deadlineMode === 'custom' ? 'none' : 'custom');
+                            }}
+                          >
+                            <Text style={styles.smallChipText}>Custom duration...</Text>
                           </TouchableOpacity>
                         </View>
-                      ) : (
-                        <TouchableOpacity
-                          style={styles.sheetListRow}
-                          onPress={() => {
-                            configureSmoothLayout();
-                            setInlineNewCatMode(true);
-                          }}
-                        >
-                          <Text style={styles.greenPlusIcon}>＋</Text>
-                          <Text style={styles.sheetListText}>Add category</Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  )}
 
-                  {activeSheetPanel === 'weight' && (
-                    <View>
-                      <Text style={styles.panelSubLabel}>
-                        Weight (Daily Roll Capacity & Focus Time):
-                      </Text>
-                      {[
-                        { val: 1, mins: 30, label: 'Easy (1 slot • Suggests 30m)' },
-                        { val: 2, mins: 90, label: 'Medium (2 slots • Suggests 1h 30m)' },
-                        { val: 3, mins: 240, label: 'Hard (3 slots • Suggests 4h)' },
-                      ].map((item) => (
-                        <TouchableOpacity
-                          key={item.val}
-                          style={styles.sheetListRow}
-                          onPress={() => {
-                            setDifficultyInput(item.val);
-                            setFocusMinutesInput(item.mins);
-                          }}
-                        >
-                          <View style={styles.radioOuter}>
-                            {difficultyInput === item.val && <View style={styles.radioInner} />}
-                          </View>
-                          <Text style={styles.sheetListText}>{item.label}</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  )}
+                        {deadlineMode === 'calendar' && renderCalendarAndTimePicker()}
 
-                  {activeSheetPanel === 'urgency' && (
-                    <View>
-                      <Text style={styles.panelSubLabel}>Urgency Coefficient:</Text>
-                      {[
-                        { val: 'low', label: 'Low (1 roll ticket)' },
-                        { val: 'normal', label: 'Normal (3 roll tickets)' },
-                        { val: 'high', label: 'High (Priority roll + Orange dot)' },
-                      ].map((item) => (
-                        <TouchableOpacity
-                          key={item.val}
-                          style={styles.sheetListRow}
-                          onPress={() => setUrgencyInput(item.val)}
-                        >
-                          <View style={styles.radioOuter}>
-                            {urgencyInput === item.val && <View style={styles.radioInner} />}
-                          </View>
-                          <Text style={styles.sheetListText}>{item.label}</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  )}
-
-                  {activeSheetPanel === 'schedule' && (
-                    <View>
-                      <Text style={styles.panelSubLabel}>
-                        Deadline (3 suggestions + Custom):
-                      </Text>
-                      <View style={styles.chipsWrapRow}>
-                        {[
-                          { hrs: 3, label: 'In 3 hours' },
-                          { hrs: 24, label: 'Tomorrow (24h)' },
-                          { hrs: 72, label: 'In 3 days' },
-                        ].map((p) => {
-                          const active = !isCustomDeadline && deadlineHoursInput === p.hrs;
-                          return (
-                            <TouchableOpacity
-                              key={String(p.hrs)}
-                              style={[styles.smallChip, active && styles.smallChipActive]}
-                              onPress={() => {
-                                configureSmoothLayout();
-                                setIsCustomDeadline(false);
-                                setDeadlineHoursInput(active ? null : p.hrs);
-                              }}
-                            >
-                              <Text style={styles.smallChipText}>{p.label}</Text>
-                            </TouchableOpacity>
-                          );
-                        })}
-
-                        <TouchableOpacity
-                          style={[styles.smallChip, isCustomDeadline && styles.smallChipActive]}
-                          onPress={() => {
-                            configureSmoothLayout();
-                            setIsCustomDeadline(!isCustomDeadline);
-                            if (isCustomDeadline) setDeadlineHoursInput(null);
-                          }}
-                        >
-                          <Text style={styles.smallChipText}>Custom...</Text>
-                        </TouchableOpacity>
-                      </View>
-
-                      {isCustomDeadline && (
-                        <View style={styles.customTimeRow}>
-                          <TextInput
-                            style={styles.customTimeInput}
-                            placeholder="Enter time..."
-                            placeholderTextColor="#787882"
-                            keyboardType="numeric"
-                            value={customDeadlineValue}
-                            onChangeText={setCustomDeadlineValue}
-                          />
-                          {['hours', 'days'].map((unit) => (
-                            <TouchableOpacity
-                              key={unit}
-                              style={[
-                                styles.unitChip,
-                                customDeadlineUnit === unit && styles.smallChipActive,
-                              ]}
-                              onPress={() => setCustomDeadlineUnit(unit)}
-                            >
-                              <Text style={styles.smallChipText}>{unit}</Text>
-                            </TouchableOpacity>
-                          ))}
-                        </View>
-                      )}
-
-                      <Text style={[styles.panelSubLabel, { marginTop: 12 }]}>
-                        Repeat / Habit:
-                      </Text>
-                      <View style={styles.chipsWrapRow}>
-                        {[
-                          { type: 'none', label: "Don't repeat" },
-                          { type: 'daily', label: 'Daily' },
-                          { type: 'weekly', label: 'X times / week' },
-                        ].map((r) => {
-                          const active = recurrenceTypeInput === r.type;
-                          return (
-                            <TouchableOpacity
-                              key={r.type}
-                              style={[styles.smallChip, active && styles.smallChipActive]}
-                              onPress={() => {
-                                configureSmoothLayout();
-                                setRecurrenceTypeInput(r.type);
-                              }}
-                            >
-                              <Text style={styles.smallChipText}>{r.label}</Text>
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </View>
-
-                      {recurrenceTypeInput === 'weekly' && (
-                        <View style={{ marginTop: 8 }}>
-                          <Text style={styles.panelSubLabel}>
-                            Weekly goal: {weeklyQuotaInput}x per week (Target days):
-                          </Text>
-                          <View style={styles.chipsWrapRow}>
-                            {[1, 2, 3, 4, 5, 6].map((num) => (
+                        {deadlineMode === 'custom' && (
+                          <View style={styles.customTimeRow}>
+                            <TextInput
+                              style={styles.customTimeInput}
+                              placeholder="Enter time..."
+                              placeholderTextColor="#787882"
+                              keyboardType="numeric"
+                              value={customDeadlineValue}
+                              onChangeText={setCustomDeadlineValue}
+                            />
+                            {['hours', 'days'].map((unit) => (
                               <TouchableOpacity
-                                key={num}
+                                key={unit}
                                 style={[
-                                  styles.dayCircleBtn,
-                                  weeklyQuotaInput === num && styles.smallChipActive,
+                                  styles.unitChip,
+                                  customDeadlineUnit === unit && styles.smallChipActive,
                                 ]}
-                                onPress={() => setWeeklyQuotaInput(num)}
+                                onPress={() => setCustomDeadlineUnit(unit)}
                               >
-                                <Text style={styles.smallChipText}>{num}x</Text>
+                                <Text style={styles.smallChipText}>{unit}</Text>
                               </TouchableOpacity>
                             ))}
                           </View>
-                          <View style={[styles.chipsWrapRow, { marginTop: 6 }]}>
-                            {WEEK_DAYS.map((d) => {
-                              const selected = targetDaysInput.includes(d.id);
-                              return (
+                        )}
+
+                        <Text style={[styles.panelSubLabel, { marginTop: 12 }]}>
+                          Repeat / Habit:
+                        </Text>
+                        <View style={styles.chipsWrapRow}>
+                          {[
+                            { type: 'none', label: "Don't repeat" },
+                            { type: 'daily', label: 'Daily' },
+                            { type: 'weekly', label: 'X times / week' },
+                          ].map((r) => {
+                            const active = recurrenceTypeInput === r.type;
+                            return (
+                              <TouchableOpacity
+                                key={r.type}
+                                style={[styles.smallChip, active && styles.smallChipActive]}
+                                onPress={() => {
+                                  configureSmoothLayout();
+                                  setRecurrenceTypeInput(r.type);
+                                }}
+                              >
+                                <Text style={styles.smallChipText}>{r.label}</Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+
+                        {recurrenceTypeInput === 'weekly' && (
+                          <View style={{ marginTop: 8 }}>
+                            <Text style={styles.panelSubLabel}>
+                              Weekly goal: {weeklyQuotaInput}x per week (Target days):
+                            </Text>
+                            <View style={styles.chipsWrapRow}>
+                              {[1, 2, 3, 4, 5, 6].map((num) => (
                                 <TouchableOpacity
-                                  key={d.id}
+                                  key={num}
                                   style={[
                                     styles.dayCircleBtn,
-                                    selected && styles.smallChipActive,
+                                    weeklyQuotaInput === num && styles.smallChipActive,
                                   ]}
-                                  onPress={() => {
-                                    if (selected) {
-                                      setTargetDaysInput(
-                                        targetDaysInput.filter((x) => x !== d.id)
-                                      );
-                                    } else {
-                                      setTargetDaysInput([...targetDaysInput, d.id]);
-                                    }
-                                  }}
+                                  onPress={() => setWeeklyQuotaInput(num)}
                                 >
-                                  <Text style={styles.smallChipText}>{d.short}</Text>
+                                  <Text style={styles.smallChipText}>{num}x</Text>
                                 </TouchableOpacity>
-                              );
-                            })}
+                              ))}
+                            </View>
+                            <View style={[styles.chipsWrapRow, { marginTop: 6 }]}>
+                              {WEEK_DAYS.map((d) => {
+                                const selected = targetDaysInput.includes(d.id);
+                                return (
+                                  <TouchableOpacity
+                                    key={d.id}
+                                    style={[
+                                      styles.dayCircleBtn,
+                                      selected && styles.smallChipActive,
+                                    ]}
+                                    onPress={() => {
+                                      if (selected) {
+                                        setTargetDaysInput(
+                                          targetDaysInput.filter((x) => x !== d.id)
+                                        );
+                                      } else {
+                                        setTargetDaysInput([...targetDaysInput, d.id]);
+                                      }
+                                    }}
+                                  >
+                                    <Text style={styles.smallChipText}>{d.short}</Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
                           </View>
-                        </View>
-                      )}
-                    </View>
-                  )}
-                </View>
+                        )}
+                      </View>
+                    )}
+                  </View>
+                </ScrollView>
               )}
             </Animated.View>
           </KeyboardAvoidingView>
@@ -2672,7 +3082,7 @@ export default function App() {
   // Interpolations for One UI Collapsible Viewing Area
   const expandedHeaderHeight = scrollY.interpolate({
     inputRange: [0, 110],
-    outputRange: [95, 0],
+    outputRange: [92, 0],
     extrapolate: 'clamp',
   });
   const expandedTitleOpacity = scrollY.interpolate({
@@ -2695,7 +3105,7 @@ export default function App() {
       ]}
     >
       <SafeAreaView style={styles.safeArea}>
-        <StatusBar barStyle="light-content" backgroundColor="#0B0B12" />
+        <StatusBar barStyle="light-content" backgroundColor="#0B0B12" translucent={false} />
 
         {selectionMode ? (
           <View style={styles.selectionHeader}>
@@ -2829,7 +3239,7 @@ export default function App() {
             </TouchableOpacity>
           </View>
 
-          {/* Conditional "Selected" Section: Only exists visually when at least 1 task is selected/rolled */}
+          {/* Conditional "Selected" Section */}
           {selectedSectionTasks.length > 0 && (
             <View style={styles.sectionBlock}>
               <View style={styles.sectionHeaderRow}>
@@ -2896,6 +3306,22 @@ function formatCompletedDateString(date) {
   return `${days[date.getDay()]} ${date.getDate()} ${months[date.getMonth()]}`;
 }
 
+function formatDeadlineShort(date) {
+  const todayStr = getLocalDayStr(new Date());
+  const tomorrowDate = new Date();
+  tomorrowDate.setDate(tomorrowDate.getDate() + 1);
+  const tomorrowStr = getLocalDayStr(tomorrowDate);
+  const targetStr = getLocalDayStr(date);
+
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+
+  if (targetStr === todayStr) return `Today, ${hh}:${mm}`;
+  if (targetStr === tomorrowStr) return `Tomorrow, ${hh}:${mm}`;
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${date.getDate()} ${months[date.getMonth()]}, ${hh}:${mm}`;
+}
+
 function formatShortDate(date) {
   const d = String(date.getDate()).padStart(2, '0');
   const m = String(date.getMonth() + 1).padStart(2, '0');
@@ -2908,8 +3334,21 @@ function formatRemainingTime(ms) {
   const totalMins = Math.floor(ms / 60000);
   if (totalMins < 60) return `${totalMins}m left`;
   const hrs = Math.floor(totalMins / 60);
-  if (hrs < 48) return `${hrs}h left`;
-  return `${Math.floor(hrs / 24)}d left`;
+  const remMins = totalMins % 60;
+  if (hrs < 48) {
+    return remMins > 0 ? `${hrs}h ${remMins}m left` : `${hrs}h left`;
+  }
+  const days = Math.floor(hrs / 24);
+  const remHrs = hrs % 24;
+  return remHrs > 0 ? `${days}d ${remHrs}h left` : `${days}d left`;
+}
+
+function formatExactHoursAndMinutes(ms) {
+  const totalMins = Math.max(0, Math.floor(ms / 60000));
+  const hrs = Math.floor(totalMins / 60);
+  const mins = totalMins % 60;
+  if (hrs === 0) return `${mins}m`;
+  return mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
 }
 
 function formatStopwatch(ms) {
@@ -2927,11 +3366,12 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#0B0B12',
+    paddingTop: TOP_INSET,
   },
   oneUiExpandedHeader: {
     alignItems: 'center',
     justifyContent: 'flex-end',
-    paddingBottom: 6,
+    paddingBottom: 8,
     overflow: 'hidden',
   },
   oneUiExpandedTitle: {
@@ -2945,8 +3385,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: 10,
-    paddingBottom: 12,
+    paddingTop: 12,
+    paddingBottom: 14,
   },
   headerTitle: {
     fontSize: 24,
@@ -2975,17 +3415,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 14,
+    paddingHorizontal: 20,
+    paddingTop: 18,
+    paddingBottom: 18,
+    marginBottom: 4,
   },
   rowCenter: {
     flexDirection: 'row',
     alignItems: 'center',
   },
   backBtn: {
-    paddingRight: 14,
-    paddingVertical: 4,
+    paddingRight: 16,
+    paddingVertical: 6,
   },
   backArrow: {
     fontSize: 32,
@@ -2994,7 +3435,7 @@ const styles = StyleSheet.create({
     marginTop: -4,
   },
   subScreenTitle: {
-    fontSize: 22,
+    fontSize: 23,
     fontWeight: '700',
     color: '#EAEAEF',
   },
@@ -3007,8 +3448,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 12,
+    paddingTop: 18,
+    paddingBottom: 16,
+    marginBottom: 4,
   },
   selectAllCircleWrap: {
     alignItems: 'center',
@@ -3029,13 +3471,14 @@ const styles = StyleSheet.create({
     color: '#EAEAEF',
   },
   scrollContent: {
-    paddingHorizontal: 14,
-    paddingBottom: 130,
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    paddingBottom: 140,
   },
   bentoGridThree: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 20,
+    marginBottom: 22,
   },
   bentoBox: {
     width: '31.5%',
@@ -3071,7 +3514,7 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   sectionBlock: {
-    marginBottom: 20,
+    marginBottom: 22,
   },
   sectionHeaderRow: {
     flexDirection: 'row',
@@ -3086,14 +3529,14 @@ const styles = StyleSheet.create({
     color: '#9A9AA6',
   },
   groupSection: {
-    marginBottom: 18,
+    marginBottom: 20,
   },
   groupHeaderLabel: {
     fontSize: 14,
     fontWeight: '600',
     color: '#9A9AA6',
     marginLeft: 8,
-    marginBottom: 8,
+    marginBottom: 10,
   },
   groupedCardContainer: {
     backgroundColor: '#16161E',
@@ -3280,7 +3723,7 @@ const styles = StyleSheet.create({
   },
   scrollTopFloatingBtn: {
     position: 'absolute',
-    bottom: 82,
+    bottom: 84,
     alignSelf: 'center',
     width: 40,
     height: 40,
@@ -3298,7 +3741,7 @@ const styles = StyleSheet.create({
   },
   bottomFloatingWrapper: {
     position: 'absolute',
-    bottom: 18,
+    bottom: 20,
     left: 20,
     right: 20,
   },
@@ -3327,7 +3770,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#16161E',
     borderRadius: 26,
     padding: 22,
-    marginHorizontal: 8,
+    marginHorizontal: 14,
     marginTop: 8,
   },
   detailsTitleText: {
@@ -3419,6 +3862,7 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 28,
     paddingHorizontal: 20,
     paddingBottom: 22,
+    maxHeight: '88%',
   },
   sheetHandleTouchArea: {
     paddingTop: 12,
@@ -3452,7 +3896,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   sheetChecklistScroll: {
-    maxHeight: 160,
+    maxHeight: 140,
     marginTop: 6,
   },
   sheetChecklistRow: {
@@ -3531,6 +3975,9 @@ const styles = StyleSheet.create({
     fontSize: 18,
     color: '#FFF',
   },
+  sheetExpandedScroll: {
+    maxHeight: 370,
+  },
   sheetExpandedArea: {
     marginTop: 10,
     paddingTop: 12,
@@ -3540,7 +3987,218 @@ const styles = StyleSheet.create({
   panelSubLabel: {
     fontSize: 12.5,
     color: '#9A9AA6',
+    marginBottom: 10,
+  },
+  // 3-Stage Interactive Bar Styles
+  stageBarContainer: {
+    marginVertical: 4,
+  },
+  stageTrackWrapper: {
+    height: 64,
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  stageTrackBackground: {
+    height: 8,
+    backgroundColor: '#191920',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginHorizontal: 24,
+    marginBottom: 18,
+  },
+  stageTrackFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  stageSegmentsOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 4,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  stageTouchSegment: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  stageNodeCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#2B2B35',
+    borderWidth: 2,
+    borderColor: '#555562',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+  },
+  stageNodeCircleCurrent: {
+    transform: [{ scale: 1.12 }],
+  },
+  stageNodeNumber: {
+    fontSize: 12,
+    color: '#9A9AA6',
+    fontWeight: '600',
+  },
+  stageSegmentLabel: {
+    fontSize: 13,
+    color: '#9A9AA6',
+    fontWeight: '500',
+  },
+  stageSummaryBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#191920',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginTop: 6,
+  },
+  stageSummaryDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 10,
+  },
+  stageSummaryText: {
+    fontSize: 13,
+    color: '#B0B0B8',
+  },
+  // Calendar & Specific Time Styles
+  calendarCard: {
+    backgroundColor: '#191920',
+    borderRadius: 20,
+    padding: 14,
+    marginTop: 4,
     marginBottom: 8,
+  },
+  calQuickDaysRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: 10,
+  },
+  calQuickChip: {
+    backgroundColor: '#2C2C35',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 14,
+    marginRight: 6,
+    marginBottom: 6,
+  },
+  calMonthHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+  calNavBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+  },
+  calNavArrow: {
+    fontSize: 22,
+    color: '#EAEAEF',
+    fontWeight: '600',
+  },
+  calMonthTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  calWeekRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginBottom: 6,
+  },
+  calWeekHeaderText: {
+    width: '14.2%',
+    textAlign: 'center',
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: '#787885',
+  },
+  calDaysGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  calDayCell: {
+    width: '14.28%',
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 17,
+    marginBottom: 2,
+  },
+  calDayCellToday: {
+    borderWidth: 1,
+    borderColor: '#C5A888',
+  },
+  calDayCellSelected: {
+    backgroundColor: '#C5B4A0',
+  },
+  calDayText: {
+    fontSize: 13.5,
+    color: '#EAEAEF',
+  },
+  calTimeSection: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#2A2A35',
+  },
+  calTimeHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  calTimeStepperRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  timeStepBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#2C2C35',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  timeStepBtnText: {
+    color: '#FFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  calTimeBoxInput: {
+    width: 40,
+    height: 32,
+    backgroundColor: '#121217',
+    borderRadius: 8,
+    color: '#FFF',
+    fontSize: 15,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginHorizontal: 4,
+    paddingVertical: 0,
+  },
+  calTimeColon: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: '700',
+    marginHorizontal: 6,
+  },
+  calCountdownPreview: {
+    backgroundColor: '#121217',
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginTop: 6,
+  },
+  calCountdownPreviewText: {
+    fontSize: 12.5,
+    color: '#B0B0B8',
   },
   sheetListRow: {
     flexDirection: 'row',
@@ -3617,7 +4275,7 @@ const styles = StyleSheet.create({
   },
   popoverMenu: {
     alignSelf: 'flex-end',
-    marginTop: 52,
+    marginTop: TOP_INSET + 44,
     marginRight: 16,
     backgroundColor: '#222228',
     borderRadius: 24,
