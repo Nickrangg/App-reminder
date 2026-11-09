@@ -43,6 +43,13 @@ const WEEK_DAYS = [
 
 const CATEGORY_COLORS = ['#B8E986', '#5AC8FA', '#AF52DE', '#FF9500', '#FF6B6B', '#20E3B2'];
 
+const getLocalDayStr = (date = new Date()) => {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
 const configureSmoothLayout = () => {
   LayoutAnimation.configureNext({
     duration: 240,
@@ -174,15 +181,28 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Day/week rollover check
+  // Midnight (00:00) automatic unselect & day/week rollover check
   useEffect(() => {
     if (tasks.length === 0) return;
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = getLocalDayStr(new Date());
     const currentWeekKey = getWeekKey(new Date());
 
     let changed = false;
     const updated = tasks.map((t) => {
       let copy = { ...t };
+
+      // Automatically unselect all tasks in "Selected" at midnight (00:00) when day turns over
+      if (copy.inDailyRoll) {
+        if (!copy.selectedForDate) {
+          copy.selectedForDate = todayStr;
+          changed = true;
+        } else if (copy.selectedForDate !== todayStr) {
+          copy.inDailyRoll = false;
+          copy.selectedForDate = null;
+          changed = true;
+        }
+      }
+
       if (copy.recurrenceType && copy.recurrenceType !== 'none') {
         if (copy.lastCompletedDate && copy.lastCompletedDate !== todayStr && copy.completedToday) {
           copy.completedToday = false;
@@ -199,6 +219,7 @@ export default function App() {
     });
 
     if (changed) {
+      configureSmoothLayout();
       saveTasks(updated);
     }
   }, [now]);
@@ -208,14 +229,24 @@ export default function App() {
     const day = d.getDay();
     const diff = d.getDate() - day + (day === 0 ? -6 : 1);
     const monday = new Date(d.setDate(diff));
-    return monday.toISOString().slice(0, 10);
+    return getLocalDayStr(monday);
   };
 
   const loadData = async () => {
     try {
       const savedTasks = await AsyncStorage.getItem(STORAGE_TASKS_KEY);
       const savedCats = await AsyncStorage.getItem(STORAGE_CATS_KEY);
-      if (savedTasks) setTasks(JSON.parse(savedTasks));
+      if (savedTasks) {
+        const parsed = JSON.parse(savedTasks);
+        const todayStr = getLocalDayStr(new Date());
+        const cleaned = parsed.map((t) => {
+          if (t.inDailyRoll && t.selectedForDate && t.selectedForDate !== todayStr) {
+            return { ...t, inDailyRoll: false, selectedForDate: null };
+          }
+          return t;
+        });
+        setTasks(cleaned);
+      }
       if (savedCats) setCategories(JSON.parse(savedCats));
     } catch (e) {
       console.error('Failed to load data:', e);
@@ -336,21 +367,47 @@ export default function App() {
     return task.urgency || 'normal';
   };
 
-  // Daily Roll Algorithm
+  // Daily Roll Algorithm: Critical & Urgent tasks enter "Selected" first and consume daily capacity points
   const rollDailyMissions = () => {
     configureSmoothLayout();
+    const todayStr = getLocalDayStr(new Date());
     const activeUncompleted = tasks.filter((t) => !t.completed && !t.completedToday);
 
-    const doingTask = activeUncompleted.find((t) => t.isDoing);
-    let remainingCapacity = DAILY_CAPACITY - (doingTask ? doingTask.difficulty : 0);
-
+    let remainingCapacity = DAILY_CAPACITY;
     const selectedIds = new Set();
-    if (doingTask) selectedIds.add(doingTask.id);
 
+    // 1. Doing task stays locked and consumes capacity first
+    const doingTask = activeUncompleted.find((t) => t.isDoing);
+    if (doingTask) {
+      selectedIds.add(doingTask.id);
+      remainingCapacity -= doingTask.difficulty || 1;
+    }
+
+    // 2. Mandatory Critical tasks enter "Selected" and consume capacity points
+    const criticalList = activeUncompleted.filter(
+      (t) => !t.isDoing && getEffectiveUrgency(t) === 'critical'
+    );
+    criticalList.forEach((t) => {
+      selectedIds.add(t.id);
+      remainingCapacity -= t.difficulty || 1;
+    });
+
+    // 3. High Urgency tasks enter "Selected" first (within capacity) consuming points before normal/low tasks
+    const urgentList = activeUncompleted.filter(
+      (t) => !t.isDoing && getEffectiveUrgency(t) === 'high'
+    );
+    const shuffledUrgent = [...urgentList].sort(() => Math.random() - 0.5);
+    shuffledUrgent.forEach((t) => {
+      const diff = t.difficulty || 1;
+      if (remainingCapacity >= diff) {
+        selectedIds.add(t.id);
+        remainingCapacity -= diff;
+      }
+    });
+
+    // 4. Fill remaining capacity with remaining eligible tasks via weighted lottery
     const pool = activeUncompleted.filter((t) => {
-      if (t.isDoing) return false;
-      const effUrg = getEffectiveUrgency(t);
-      if (effUrg === 'critical') return false;
+      if (selectedIds.has(t.id)) return false;
       if (t.recurrenceType === 'weekly' && (t.weeklyCount || 0) >= (t.weeklyQuota || 3)) {
         return false;
       }
@@ -373,9 +430,10 @@ export default function App() {
       const picked = weightedPool[randIndex];
 
       if (!selectedIds.has(picked.id)) {
-        if (picked.difficulty <= remainingCapacity) {
+        const diff = picked.difficulty || 1;
+        if (diff <= remainingCapacity) {
           selectedIds.add(picked.id);
-          remainingCapacity -= picked.difficulty;
+          remainingCapacity -= diff;
         }
         weightedPool = weightedPool.filter((t) => t.id !== picked.id);
       }
@@ -384,10 +442,52 @@ export default function App() {
     const updated = tasks.map((t) => ({
       ...t,
       inDailyRoll: selectedIds.has(t.id),
+      selectedForDate: selectedIds.has(t.id) ? todayStr : null,
       updatedAt: Date.now(),
     }));
     saveTasks(updated);
     setMoreMenuVisible(false);
+  };
+
+  // Manual toggle for a single task to enter/leave "Selected"
+  const toggleTaskSelectedForToday = (taskId) => {
+    configureSmoothLayout();
+    const todayStr = getLocalDayStr(new Date());
+    const updated = tasks.map((t) => {
+      if (t.id !== taskId) return t;
+      const nextState = !t.inDailyRoll;
+      return {
+        ...t,
+        inDailyRoll: nextState,
+        selectedForDate: nextState ? todayStr : null,
+        updatedAt: Date.now(),
+      };
+    });
+    saveTasks(updated);
+  };
+
+  // Manual batch toggle for multi-selected tasks to enter/leave "Selected"
+  const handleBatchToggleSelectedSection = () => {
+    configureSmoothLayout();
+    const todayStr = getLocalDayStr(new Date());
+    const selectedObjs = tasks.filter((t) => selectedTaskIds.includes(t.id));
+    const allAlreadyInSelected =
+      selectedObjs.length > 0 && selectedObjs.every((t) => t.inDailyRoll);
+    const targetState = !allAlreadyInSelected;
+
+    const updated = tasks.map((t) =>
+      selectedTaskIds.includes(t.id)
+        ? {
+            ...t,
+            inDailyRoll: targetState,
+            selectedForDate: targetState ? todayStr : null,
+            updatedAt: Date.now(),
+          }
+        : t
+    );
+    saveTasks(updated);
+    setSelectionMode(false);
+    setSelectedTaskIds([]);
   };
 
   // Checklist Helpers inside Bottom Sheet (Auto-focuses new item on Enter)
@@ -597,7 +697,8 @@ export default function App() {
         weekKey: getWeekKey(new Date()),
         completed: false,
         completedToday: false,
-        inDailyRoll: true,
+        inDailyRoll: false,
+        selectedForDate: null,
         descExpanded: true,
         isDoing: false,
         doingStartedAt: null,
@@ -608,10 +709,10 @@ export default function App() {
     closeSheet();
   };
 
-  // Complete / Uncomplete Task with visual pause (just like 00:46-00:48 in reference video)
+  // Complete / Uncomplete Task with visual pause
   const commitToggleComplete = (taskId) => {
     configureSmoothLayout();
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = getLocalDayStr(new Date());
     const todayDay = new Date().getDay();
     const timeLabel = formatTimeAMPM(new Date());
     const fullDateLabel = formatCompletedDateString(new Date());
@@ -635,6 +736,8 @@ export default function App() {
           weeklyCount: nextCount,
           completedDaysThisWeek: nextDays,
           isDoing: false,
+          inDailyRoll: !alreadyDoneToday ? false : t.inDailyRoll,
+          selectedForDate: !alreadyDoneToday ? null : t.selectedForDate,
           updatedAt: Date.now(),
         };
       }
@@ -646,6 +749,8 @@ export default function App() {
         completedAtText: nextCompleted ? `Completed: ${fullDateLabel}, ${timeLabel}` : null,
         completedTimestamp: nextCompleted ? Date.now() : null,
         isDoing: false,
+        inDailyRoll: nextCompleted ? false : t.inDailyRoll,
+        selectedForDate: nextCompleted ? null : t.selectedForDate,
         updatedAt: Date.now(),
       };
     });
@@ -659,7 +764,6 @@ export default function App() {
 
     const isCurrentlyDone = target.completed || target.completedToday;
     if (!isCurrentlyDone) {
-      // Visual feedback pause before moving out of active list
       setCompletingIds((prev) => [...prev, taskId]);
       setTimeout(() => {
         setCompletingIds((prev) => prev.filter((id) => id !== taskId));
@@ -690,6 +794,7 @@ export default function App() {
     }
 
     configureSmoothLayout();
+    const todayStr = getLocalDayStr(new Date());
     const clampedMinutes = Math.min(1440, Math.max(1, minutesOverride || task.focusMinutes || 30));
     const updated = tasks.map((t) =>
       t.id === task.id
@@ -697,6 +802,7 @@ export default function App() {
             ...t,
             isDoing: !t.isDoing,
             inDailyRoll: true,
+            selectedForDate: todayStr,
             doingStartedAt: !t.isDoing ? Date.now() : null,
             doingDurationMs: !t.isDoing ? clampedMinutes * 60 * 1000 : null,
           }
@@ -736,6 +842,8 @@ export default function App() {
             completedAtText: `Completed: ${fullDateLabel}, ${timeLabel}`,
             completedTimestamp: Date.now(),
             isDoing: false,
+            inDailyRoll: false,
+            selectedForDate: null,
           }
         : t
     );
@@ -857,16 +965,23 @@ export default function App() {
   const backlogTasks = tasks.filter((t) => !t.completed);
   const completedTasks = tasks.filter((t) => t.completed);
 
-  const mainRolledTasks = sortTasksList(
-    tasks.filter((t) => {
-      if (t.completed || t.completedToday) return false;
-      const effUrg = getEffectiveUrgency(t);
-      return t.isDoing || effUrg === 'critical' || t.inDailyRoll;
-    })
+  // All pending tasks displayed in the "All" section on Home
+  const allPendingTasks = sortTasksList(
+    tasks.filter((t) => !t.completed && !t.completedToday)
   );
 
-  // Task Card Renderer (supports standalone card or grouped divider row)
-  const renderTaskCard = (task, isGroupedItem = false, isLastInGroup = true) => {
+  // Conditional "Selected" section tasks (only tasks selected or rolled for today)
+  const selectedSectionTasks = sortTasksList(
+    tasks.filter((t) => !t.completed && !t.completedToday && (t.inDailyRoll || t.isDoing))
+  );
+
+  // Task Card Renderer (supports subtle highlight in "All" when task is also in "Selected")
+  const renderTaskCard = (
+    task,
+    isGroupedItem = false,
+    isLastInGroup = true,
+    sectionContext = 'default'
+  ) => {
     const isSelected = selectedTaskIds.includes(task.id);
     const isCompletingNow = completingIds.includes(task.id);
     const visualDone = task.completed || task.completedToday || isCompletingNow;
@@ -874,6 +989,9 @@ export default function App() {
     const isUrgentOrCritical = effUrg === 'high' || effUrg === 'critical';
     const hasExpandableContent =
       Boolean(task.description) || (task.checklist && task.checklist.length > 0);
+
+    const isHighlightedInAll =
+      sectionContext === 'all' && (task.inDailyRoll || task.isDoing) && !visualDone;
 
     // Bottom Deadline Bar calculation
     let deadlinePercent = null;
@@ -907,9 +1025,10 @@ export default function App() {
 
     return (
       <Pressable
-        key={task.id}
+        key={`${sectionContext}-${task.id}`}
         style={[
           isGroupedItem ? styles.groupedReminderRow : styles.reminderCard,
+          isHighlightedInAll && !isGroupedItem && styles.reminderCardInSelectedHighlight,
           task.isDoing && !isGroupedItem && styles.reminderCardDoing,
           isSelected && styles.reminderCardSelected,
           isCompletingNow && { opacity: 0.65 },
@@ -959,6 +1078,11 @@ export default function App() {
                 {task.title}
               </Text>
               {isUrgentOrCritical && !visualDone && <View style={styles.orangeDot} />}
+              {isHighlightedInAll && (
+                <View style={styles.selectedIndicatorBadge}>
+                  <Text style={styles.selectedIndicatorBadgeText}>Selected</Text>
+                </View>
+              )}
             </View>
 
             {task.isDoing && (
@@ -1024,7 +1148,7 @@ export default function App() {
                 : [
                     task.category !== 'My reminders' ? task.category : null,
                     task.difficulty === 1 ? 'Easy' : task.difficulty === 2 ? 'Medium' : 'Hard',
-                    effUrg === 'critical' ? 'Pinned/Urgent' : null,
+                    effUrg === 'critical' ? 'Critical' : null,
                     task.deadlineAt ? deadlineLabel : null,
                     task.recurrenceType === 'daily' ? 'Daily' : null,
                     task.recurrenceType === 'weekly'
@@ -1060,13 +1184,13 @@ export default function App() {
     );
   };
 
-  const renderSortedTaskList = (list) => {
+  const renderSortedTaskList = (list, sectionContext = 'default') => {
     if (list.length === 0) {
       return (
         <View style={styles.emptyBox}>
           <Text style={styles.emptyTitle}>No reminders</Text>
           <Text style={styles.emptySub}>
-            Tap "Add reminder" below to create one, or tap 🎲 to roll your daily quests.
+            Tap "Add reminder" below to create one, or open the ⋮ menu to roll daily quests.
           </Text>
         </View>
       );
@@ -1081,17 +1205,17 @@ export default function App() {
       });
 
       return Object.keys(grouped).map((catName) => (
-        <View key={catName} style={styles.groupSection}>
+        <View key={`${sectionContext}-group-${catName}`} style={styles.groupSection}>
           <Text style={styles.groupHeaderLabel}>{catName}</Text>
-          {grouped[catName].map((t) => renderTaskCard(t))}
+          {grouped[catName].map((t) => renderTaskCard(t, false, true, sectionContext))}
         </View>
       ));
     }
 
-    return list.map((t) => renderTaskCard(t));
+    return list.map((t) => renderTaskCard(t, false, true, sectionContext));
   };
 
-  // Group completed tasks by period (Last 7 days / Month) inside unified rounded cards (00:49-00:52)
+  // Group completed tasks by period (Last 7 days / Month) inside unified rounded cards
   const renderGroupedCompletedList = (list) => {
     if (list.length === 0) {
       return (
@@ -1123,7 +1247,7 @@ export default function App() {
           <Text style={styles.groupHeaderLabel}>{groupLabel}</Text>
           <View style={styles.groupedCardContainer}>
             {items.map((item, idx) =>
-              renderTaskCard(item, true, idx === items.length - 1)
+              renderTaskCard(item, true, idx === items.length - 1, 'completed')
             )}
           </View>
         </View>
@@ -1140,6 +1264,7 @@ export default function App() {
     }
 
     const catObj = categories.find((c) => c.name === task.category);
+    const isTaskInSelected = Boolean(task.inDailyRoll || task.isDoing);
 
     return (
       <Animated.View
@@ -1169,7 +1294,14 @@ export default function App() {
           </View>
 
           <View style={styles.detailsMainCard}>
-            <Text style={styles.detailsTitleText}>{task.title}</Text>
+            <View style={styles.titleRow}>
+              <Text style={[styles.detailsTitleText, { flex: 1 }]}>{task.title}</Text>
+              {isTaskInSelected && !task.completed && (
+                <View style={styles.selectedIndicatorBadge}>
+                  <Text style={styles.selectedIndicatorBadgeText}>Selected</Text>
+                </View>
+              )}
+            </View>
             {task.description ? (
               <Text style={styles.detailsDescText}>{task.description}</Text>
             ) : null}
@@ -1247,6 +1379,30 @@ export default function App() {
                   {task.completed ? 'Uncomplete' : 'Complete'}
                 </Text>
               </TouchableOpacity>
+
+              {!task.completed && (
+                <TouchableOpacity
+                  style={styles.actionPillBtn}
+                  onPress={() => toggleTaskSelectedForToday(task.id)}
+                >
+                  <Text
+                    style={[
+                      styles.actionPillIcon,
+                      task.inDailyRoll && { color: '#C5A888' },
+                    ]}
+                  >
+                    {task.inDailyRoll ? '★' : '☆'}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.actionPillLabel,
+                      task.inDailyRoll && { color: '#C5A888', fontWeight: '600' },
+                    ]}
+                  >
+                    {task.inDailyRoll ? 'Unselect' : 'Select'}
+                  </Text>
+                </TouchableOpacity>
+              )}
 
               {!task.completed && (
                 <TouchableOpacity
@@ -1540,7 +1696,7 @@ export default function App() {
             )}
 
             <View style={{ marginTop: 16 }}>
-              {filtered.map((t) => renderTaskCard(t))}
+              {filtered.map((t) => renderTaskCard(t, false, true, 'search'))}
             </View>
           </ScrollView>
 
@@ -1673,13 +1829,13 @@ export default function App() {
                 {pastList.length > 0 && (
                   <View style={styles.groupSection}>
                     <Text style={styles.groupHeaderLabel}>Past</Text>
-                    {pastList.map((t) => renderTaskCard(t))}
+                    {pastList.map((t) => renderTaskCard(t, false, true, 'scheduled'))}
                   </View>
                 )}
                 {soonList.length > 0 && (
                   <View style={styles.groupSection}>
                     <Text style={styles.groupHeaderLabel}>Soon</Text>
-                    {soonList.map((t) => renderTaskCard(t))}
+                    {soonList.map((t) => renderTaskCard(t, false, true, 'scheduled'))}
                   </View>
                 )}
                 {pastList.length === 0 && soonList.length === 0 && (
@@ -1691,7 +1847,7 @@ export default function App() {
             ) : currentScreen === 'completed' ? (
               renderGroupedCompletedList(currentList)
             ) : (
-              renderSortedTaskList(currentList)
+              renderSortedTaskList(currentList, currentScreen)
             )}
           </ScrollView>
 
@@ -1723,34 +1879,62 @@ export default function App() {
     );
   };
 
-  const renderBatchActionPill = () => (
-    <View style={styles.bottomActionPillWrapper}>
-      <View style={styles.bottomActionPill}>
-        <TouchableOpacity style={styles.actionPillBtn} onPress={handleBatchComplete}>
-          <Text style={styles.actionPillIcon}>✓</Text>
-          <Text style={styles.actionPillLabel}>Complete</Text>
-        </TouchableOpacity>
+  const renderBatchActionPill = () => {
+    const selectedObjs = tasks.filter((t) => selectedTaskIds.includes(t.id));
+    const allAlreadyInSelected =
+      selectedObjs.length > 0 && selectedObjs.every((t) => t.inDailyRoll);
 
-        <TouchableOpacity
-          style={styles.actionPillBtn}
-          onPress={() => setMoveCategoryModal(true)}
-        >
-          <Text style={styles.actionPillIcon}>→</Text>
-          <Text style={styles.actionPillLabel}>Move</Text>
-        </TouchableOpacity>
+    return (
+      <View style={styles.bottomActionPillWrapper}>
+        <View style={styles.bottomActionPill}>
+          <TouchableOpacity style={styles.actionPillBtn} onPress={handleBatchComplete}>
+            <Text style={styles.actionPillIcon}>✓</Text>
+            <Text style={styles.actionPillLabel}>Complete</Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity style={styles.actionPillBtn} onPress={handleBatchImportant}>
-          <Text style={styles.actionPillIcon}>★</Text>
-          <Text style={styles.actionPillLabel}>Important</Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.actionPillBtn}
+            onPress={handleBatchToggleSelectedSection}
+          >
+            <Text
+              style={[
+                styles.actionPillIcon,
+                allAlreadyInSelected && { color: '#C5A888' },
+              ]}
+            >
+              {allAlreadyInSelected ? '★' : '☆'}
+            </Text>
+            <Text
+              style={[
+                styles.actionPillLabel,
+                allAlreadyInSelected && { color: '#C5A888', fontWeight: '600' },
+              ]}
+            >
+              {allAlreadyInSelected ? 'Unselect' : 'Select'}
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity style={styles.actionPillBtn} onPress={handleBatchDelete}>
-          <Text style={styles.actionPillIcon}>🗑</Text>
-          <Text style={styles.actionPillLabel}>Delete</Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.actionPillBtn}
+            onPress={() => setMoveCategoryModal(true)}
+          >
+            <Text style={styles.actionPillIcon}>→</Text>
+            <Text style={styles.actionPillLabel}>Move</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.actionPillBtn} onPress={handleBatchImportant}>
+            <Text style={styles.actionPillIcon}>🔥</Text>
+            <Text style={styles.actionPillLabel}>Urgent</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.actionPillBtn} onPress={handleBatchDelete}>
+            <Text style={styles.actionPillIcon}>🗑</Text>
+            <Text style={styles.actionPillLabel}>Delete</Text>
+          </TouchableOpacity>
+        </View>
       </View>
-    </View>
-  );
+    );
+  };
 
   if (currentScreen === 'details') {
     return (
@@ -1953,7 +2137,7 @@ export default function App() {
                     }}
                   />
 
-                  {/* Dynamic Checkmarks List below Description (00:21-00:33) */}
+                  {/* Dynamic Checkmarks List below Description */}
                   {checklistInput.length > 0 && (
                     <ScrollView
                       style={styles.sheetChecklistScroll}
@@ -2087,7 +2271,7 @@ export default function App() {
 
                       <View style={styles.thinSheetDivider} />
 
-                      {categories.map((cat, idx) => (
+                      {categories.map((cat) => (
                         <TouchableOpacity
                           key={cat.id}
                           style={styles.sheetListRow}
@@ -2187,7 +2371,7 @@ export default function App() {
                       {[
                         { val: 'low', label: 'Low (1 roll ticket)' },
                         { val: 'normal', label: 'Normal (3 roll tickets)' },
-                        { val: 'high', label: 'High (6 roll tickets + Orange dot)' },
+                        { val: 'high', label: 'High (Priority roll + Orange dot)' },
                       ].map((item) => (
                         <TouchableOpacity
                           key={item.val}
@@ -2485,7 +2669,7 @@ export default function App() {
     );
   }
 
-  // Interpolations for One UI Collapsible Viewing Area (00:34-00:39)
+  // Interpolations for One UI Collapsible Viewing Area
   const expandedHeaderHeight = scrollY.interpolate({
     inputRange: [0, 110],
     outputRange: [95, 0],
@@ -2518,23 +2702,23 @@ export default function App() {
             <TouchableOpacity
               style={styles.selectAllCircleWrap}
               onPress={() => {
-                if (selectedTaskIds.length === mainRolledTasks.length) {
+                if (selectedTaskIds.length === allPendingTasks.length) {
                   setSelectedTaskIds([]);
                 } else {
-                  setSelectedTaskIds(mainRolledTasks.map((t) => t.id));
+                  setSelectedTaskIds(allPendingTasks.map((t) => t.id));
                 }
               }}
             >
               <View
                 style={[
                   styles.circleCheck,
-                  selectedTaskIds.length === mainRolledTasks.length &&
-                    mainRolledTasks.length > 0 &&
+                  selectedTaskIds.length === allPendingTasks.length &&
+                    allPendingTasks.length > 0 &&
                     styles.circleCheckBeige,
                 ]}
               >
-                {selectedTaskIds.length === mainRolledTasks.length &&
-                  mainRolledTasks.length > 0 && <Text style={styles.checkMarkDark}>✓</Text>}
+                {selectedTaskIds.length === allPendingTasks.length &&
+                  allPendingTasks.length > 0 && <Text style={styles.checkMarkDark}>✓</Text>}
               </View>
               <Text style={styles.selectAllSmallText}>All</Text>
             </TouchableOpacity>
@@ -2645,16 +2829,23 @@ export default function App() {
             </TouchableOpacity>
           </View>
 
-          {/* Main Area: Rolled Daily Quests */}
+          {/* Conditional "Selected" Section: Only exists visually when at least 1 task is selected/rolled */}
+          {selectedSectionTasks.length > 0 && (
+            <View style={styles.sectionBlock}>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={styles.sectionHeaderText}>Selected</Text>
+              </View>
+              {renderSortedTaskList(selectedSectionTasks, 'selected')}
+            </View>
+          )}
+
+          {/* Main Area: "All" Pending Tasks */}
           <View style={styles.sectionBlock}>
             <View style={styles.sectionHeaderRow}>
               <Text style={styles.sectionHeaderText}>All</Text>
-              <TouchableOpacity onPress={rollDailyMissions}>
-                <Text style={styles.rollLinkText}>🎲 Roll quests</Text>
-              </TouchableOpacity>
             </View>
 
-            {renderSortedTaskList(mainRolledTasks)}
+            {renderSortedTaskList(allPendingTasks, 'all')}
           </View>
         </Animated.ScrollView>
 
@@ -2678,9 +2869,7 @@ export default function App() {
               onPress={openCreateSheet}
             >
               <Text style={styles.addReminderPlaceholder}>Add reminder</Text>
-              <TouchableOpacity onPress={rollDailyMissions} style={styles.rollMiniBtn}>
-                <Text style={{ fontSize: 16 }}>🎲</Text>
-              </TouchableOpacity>
+              <Text style={styles.micIcon}>🎤</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -2896,11 +3085,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#9A9AA6',
   },
-  rollLinkText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#C5A888',
-  },
   groupSection: {
     marginBottom: 18,
   },
@@ -2929,12 +3113,31 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     overflow: 'hidden',
   },
+  reminderCardInSelectedHighlight: {
+    borderWidth: 1,
+    borderColor: '#5A534A',
+    backgroundColor: '#191922',
+  },
   reminderCardDoing: {
     borderWidth: 1,
     borderColor: '#C5A888',
   },
   reminderCardSelected: {
     backgroundColor: '#2B2B36',
+  },
+  selectedIndicatorBadge: {
+    backgroundColor: 'rgba(197, 168, 136, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(197, 168, 136, 0.45)',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+    marginLeft: 8,
+  },
+  selectedIndicatorBadgeText: {
+    fontSize: 10.5,
+    fontWeight: '600',
+    color: '#C5A888',
   },
   cardInnerRow: {
     flexDirection: 'row',
@@ -2983,6 +3186,7 @@ const styles = StyleSheet.create({
   titleRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
   },
   cardTitle: {
     fontSize: 17,
@@ -3114,9 +3318,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#8E8E98',
   },
-  rollMiniBtn: {
-    paddingHorizontal: 8,
-  },
   micIcon: {
     fontSize: 16,
     color: '#EAEAEF',
@@ -3178,8 +3379,8 @@ const styles = StyleSheet.create({
   bottomActionPillWrapper: {
     position: 'absolute',
     bottom: 20,
-    left: 28,
-    right: 28,
+    left: 20,
+    right: 20,
   },
   bottomActionPill: {
     flexDirection: 'row',
@@ -3187,13 +3388,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#1E1E26',
     borderRadius: 32,
     paddingVertical: 12,
-    paddingHorizontal: 10,
+    paddingHorizontal: 8,
     borderWidth: 1,
     borderColor: '#2B2B36',
   },
   actionPillBtn: {
     alignItems: 'center',
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
   },
   actionPillIcon: {
     fontSize: 18,
@@ -3201,7 +3402,7 @@ const styles = StyleSheet.create({
     marginBottom: 3,
   },
   actionPillLabel: {
-    fontSize: 11.5,
+    fontSize: 11,
     color: '#B0B0B8',
   },
   sheetModalContainer: {
