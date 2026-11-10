@@ -20,6 +20,7 @@ import {
   UIManager,
   KeyboardAvoidingView,
   Dimensions,
+  BackHandler,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -146,6 +147,9 @@ export default function App() {
   const [focusMinutesInput, setFocusMinutesInput] = useState(30);
   const [urgencyInput, setUrgencyInput] = useState('normal');
 
+  // Schedule Sub-tab ('deadline' | 'repeat') for clean visual organization
+  const [scheduleSubTab, setScheduleSubTab] = useState('deadline');
+
   // Deadline states (3 presets + Custom duration + Calendar & Time picker)
   const [deadlineMode, setDeadlineMode] = useState('none'); // 'none' | 'preset' | 'custom' | 'calendar'
   const [deadlineHoursInput, setDeadlineHoursInput] = useState(null);
@@ -206,6 +210,71 @@ export default function App() {
     }, 1000);
     return () => clearInterval(interval);
   }, []);
+
+  // Native Android Back Button / Gesture Interceptor
+  useEffect(() => {
+    const onHardwareBackPress = () => {
+      if (doingSetupModal) {
+        setDoingSetupModal(false);
+        return true;
+      }
+      if (catModalVisible) {
+        setCatModalVisible(false);
+        return true;
+      }
+      if (moveCategoryModal) {
+        setMoveCategoryModal(false);
+        return true;
+      }
+      if (sortMenuVisible) {
+        setSortMenuVisible(false);
+        return true;
+      }
+      if (moreMenuVisible) {
+        setMoreMenuVisible(false);
+        return true;
+      }
+      if (sheetVisible) {
+        closeSheet();
+        return true;
+      }
+      if (catSelectionMode) {
+        configureSmoothLayout();
+        setCatSelectionMode(false);
+        setSelectedCatIds([]);
+        return true;
+      }
+      if (selectionMode) {
+        configureSmoothLayout();
+        setSelectionMode(false);
+        setSelectedTaskIds([]);
+        return true;
+      }
+      if (currentScreen === 'details') {
+        navigateBack(previousScreen);
+        return true;
+      }
+      if (currentScreen !== 'home') {
+        navigateBack('home');
+        return true;
+      }
+      return false;
+    };
+
+    const subscription = BackHandler.addEventListener('hardwareBackPress', onHardwareBackPress);
+    return () => subscription.remove();
+  }, [
+    doingSetupModal,
+    catModalVisible,
+    moveCategoryModal,
+    sortMenuVisible,
+    moreMenuVisible,
+    sheetVisible,
+    catSelectionMode,
+    selectionMode,
+    currentScreen,
+    previousScreen,
+  ]);
 
   // Midnight (00:00) automatic unselect & day/week rollover check
   useEffect(() => {
@@ -602,15 +671,6 @@ export default function App() {
     setCalViewYear(nextY);
   };
 
-  const selectQuickCalendarDay = (daysAhead) => {
-    configureSmoothLayout();
-    const target = new Date();
-    target.setDate(target.getDate() + daysAhead);
-    setCalViewYear(target.getFullYear());
-    setCalViewMonth(target.getMonth());
-    setCalSelectedDateStr(getLocalDayStr(target));
-  };
-
   // Open / Close Animated Bottom Sheet
   const animateOpenSheet = () => {
     sheetTranslateY.setValue(380);
@@ -665,6 +725,7 @@ export default function App() {
     setDifficultyInput(1);
     setFocusMinutesInput(30);
     setUrgencyInput('normal');
+    setScheduleSubTab('deadline');
     setDeadlineMode('none');
     setDeadlineHoursInput(null);
     setCustomDeadlineValue('');
@@ -692,6 +753,11 @@ export default function App() {
     setDifficultyInput(task.difficulty || 1);
     setFocusMinutesInput(task.focusMinutes || 30);
     setUrgencyInput(task.urgency || 'normal');
+    setScheduleSubTab(
+      !task.deadlineAt && task.recurrenceType && task.recurrenceType !== 'none'
+        ? 'repeat'
+        : 'deadline'
+    );
 
     if (task.deadlineAt) {
       const targetDate = new Date(task.deadlineAt);
@@ -814,7 +880,7 @@ export default function App() {
     closeSheet();
   };
 
-  // Complete / Uncomplete Task with visual pause
+  // Complete / Uncomplete Task with automatic cascade completion of all internal checklist items
   const commitToggleComplete = (taskId) => {
     configureSmoothLayout();
     const todayStr = getLocalDayStr(new Date());
@@ -827,6 +893,7 @@ export default function App() {
 
       if (t.recurrenceType && t.recurrenceType !== 'none' && !t.completed) {
         const alreadyDoneToday = t.completedToday;
+        const willBeDoneToday = !alreadyDoneToday;
         const nextCount = alreadyDoneToday
           ? Math.max(0, (t.weeklyCount || 1) - 1)
           : (t.weeklyCount || 0) + 1;
@@ -834,22 +901,34 @@ export default function App() {
           ? (t.completedDaysThisWeek || []).filter((d) => d !== todayDay)
           : [...new Set([...(t.completedDaysThisWeek || []), todayDay])];
 
+        const cascadedChecklist =
+          willBeDoneToday && t.checklist
+            ? t.checklist.map((item) => ({ ...item, done: true }))
+            : t.checklist;
+
         return {
           ...t,
-          completedToday: !alreadyDoneToday,
-          lastCompletedDate: !alreadyDoneToday ? todayStr : null,
+          checklist: cascadedChecklist,
+          completedToday: willBeDoneToday,
+          lastCompletedDate: willBeDoneToday ? todayStr : null,
           weeklyCount: nextCount,
           completedDaysThisWeek: nextDays,
           isDoing: false,
-          inDailyRoll: !alreadyDoneToday ? false : t.inDailyRoll,
-          selectedForDate: !alreadyDoneToday ? null : t.selectedForDate,
+          inDailyRoll: willBeDoneToday ? false : t.inDailyRoll,
+          selectedForDate: willBeDoneToday ? null : t.selectedForDate,
           updatedAt: Date.now(),
         };
       }
 
       const nextCompleted = !t.completed;
+      const cascadedChecklist =
+        nextCompleted && t.checklist
+          ? t.checklist.map((item) => ({ ...item, done: true }))
+          : t.checklist;
+
       return {
         ...t,
+        checklist: cascadedChecklist,
         completed: nextCompleted,
         completedAtText: nextCompleted ? `Completed: ${fullDateLabel}, ${timeLabel}` : null,
         completedTimestamp: nextCompleted ? Date.now() : null,
@@ -943,6 +1022,9 @@ export default function App() {
       selectedTaskIds.includes(t.id)
         ? {
             ...t,
+            checklist: t.checklist
+              ? t.checklist.map((item) => ({ ...item, done: true }))
+              : t.checklist,
             completed: true,
             completedAtText: `Completed: ${fullDateLabel}, ${timeLabel}`,
             completedTimestamp: Date.now(),
@@ -1211,31 +1293,34 @@ export default function App() {
 
                 {task.checklist && task.checklist.length > 0 && (
                   <View style={styles.cardChecklistContainer}>
-                    {task.checklist.map((item) => (
-                      <TouchableOpacity
-                        key={item.id}
-                        style={styles.cardChecklistRow}
-                        activeOpacity={0.7}
-                        onPress={() => toggleTaskChecklistItem(task.id, item.id)}
-                      >
-                        <View
-                          style={[
-                            styles.miniCircleCheck,
-                            item.done && styles.circleCheckBeige,
-                          ]}
+                    {task.checklist.map((item) => {
+                      const itemVisualDone = item.done || visualDone;
+                      return (
+                        <TouchableOpacity
+                          key={item.id}
+                          style={styles.cardChecklistRow}
+                          activeOpacity={0.7}
+                          onPress={() => toggleTaskChecklistItem(task.id, item.id)}
                         >
-                          {item.done && <Text style={styles.miniCheckMarkDark}>✓</Text>}
-                        </View>
-                        <Text
-                          style={[
-                            styles.cardChecklistText,
-                            item.done && styles.cardTitleCompleted,
-                          ]}
-                        >
-                          {item.text}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
+                          <View
+                            style={[
+                              styles.miniCircleCheck,
+                              itemVisualDone && styles.circleCheckBeige,
+                            ]}
+                          >
+                            {itemVisualDone && <Text style={styles.miniCheckMarkDark}>✓</Text>}
+                          </View>
+                          <Text
+                            style={[
+                              styles.cardChecklistText,
+                              itemVisualDone && styles.cardTitleCompleted,
+                            ]}
+                          >
+                            {item.text}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
                   </View>
                 )}
               </>
@@ -1437,7 +1522,7 @@ export default function App() {
     );
   };
 
-  // Interactive Mini-Calendar & Time Picker inside Schedule Panel
+  // Clean, Streamlined Calendar & Specific Time Picker
   const renderCalendarAndTimePicker = () => {
     const firstDayOfMonth = new Date(calViewYear, calViewMonth, 1).getDay();
     const daysInMonth = new Date(calViewYear, calViewMonth + 1, 0).getDate();
@@ -1462,30 +1547,6 @@ export default function App() {
 
     return (
       <View style={styles.calendarCard}>
-        {/* Quick Day Shortcuts */}
-        <View style={styles.calQuickDaysRow}>
-          {[
-            { label: 'Today', offset: 0 },
-            { label: 'Tomorrow', offset: 1 },
-            { label: 'In 2 days', offset: 2 },
-            { label: 'Next week', offset: 7 },
-          ].map((qd) => {
-            const target = new Date();
-            target.setDate(target.getDate() + qd.offset);
-            const tStr = getLocalDayStr(target);
-            const active = calSelectedDateStr === tStr;
-            return (
-              <TouchableOpacity
-                key={qd.label}
-                style={[styles.calQuickChip, active && styles.smallChipActive]}
-                onPress={() => selectQuickCalendarDay(qd.offset)}
-              >
-                <Text style={styles.smallChipText}>{qd.label}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-
         {/* Month Navigation Header */}
         <View style={styles.calMonthHeader}>
           <TouchableOpacity onPress={() => changeCalendarMonth(-1)} style={styles.calNavBtn}>
@@ -1540,10 +1601,31 @@ export default function App() {
           })}
         </View>
 
-        {/* Specific Time Selector (HH : MM) */}
+        {/* Compact Time Bar: Quick Presets on Left + Stepper on Right */}
         <View style={styles.calTimeSection}>
           <View style={styles.calTimeHeaderRow}>
-            <Text style={styles.panelSubLabel}>Target Time (24h):</Text>
+            <View style={styles.calQuickTimesGroup}>
+              {[
+                { h: '09', m: '00', label: '09:00' },
+                { h: '17', m: '00', label: '17:00' },
+                { h: '23', m: '59', label: '23:59' },
+              ].map((tp) => {
+                const active = calHourInput === tp.h && calMinuteInput === tp.m;
+                return (
+                  <TouchableOpacity
+                    key={tp.label}
+                    style={[styles.calMiniTimeChip, active && styles.smallChipActive]}
+                    onPress={() => {
+                      setCalHourInput(tp.h);
+                      setCalMinuteInput(tp.m);
+                    }}
+                  >
+                    <Text style={styles.calMiniTimeChipText}>{tp.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
             <View style={styles.calTimeStepperRow}>
               <TouchableOpacity
                 style={styles.timeStepBtn}
@@ -1597,36 +1679,10 @@ export default function App() {
             </View>
           </View>
 
-          {/* Quick Time Presets */}
-          <View style={[styles.chipsWrapRow, { marginTop: 6 }]}>
-            {[
-              { h: '09', m: '00', label: '09:00' },
-              { h: '12', m: '00', label: '12:00' },
-              { h: '17', m: '00', label: '17:00' },
-              { h: '20', m: '00', label: '20:00' },
-              { h: '23', m: '59', label: '23:59' },
-            ].map((tp) => {
-              const active = calHourInput === tp.h && calMinuteInput === tp.m;
-              return (
-                <TouchableOpacity
-                  key={tp.label}
-                  style={[styles.calQuickChip, active && styles.smallChipActive]}
-                  onPress={() => {
-                    setCalHourInput(tp.h);
-                    setCalMinuteInput(tp.m);
-                  }}
-                >
-                  <Text style={styles.smallChipText}>{tp.label}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
-          {/* Automatic Countdown Preview */}
           {previewTimestamp && (
             <View style={styles.calCountdownPreview}>
               <Text style={styles.calCountdownPreviewText}>
-                ⏳ Due {formatDeadlineShort(new Date(previewTimestamp))} •{' '}
+                Due {formatDeadlineShort(new Date(previewTimestamp))} •{' '}
                 <Text
                   style={{
                     color: previewRemainingMs > 0 ? '#C5A888' : '#FF453A',
@@ -1641,6 +1697,290 @@ export default function App() {
             </View>
           )}
         </View>
+      </View>
+    );
+  };
+
+  // Reorganized, Clean Schedule Panel (Segmented Deadline & Repeat Tabs)
+  const renderSchedulePanel = () => {
+    const hasActiveDeadline = deadlineMode !== 'none';
+    const hasActiveRepeat = recurrenceTypeInput !== 'none';
+
+    let deadlineSummaryText = 'No deadline';
+    if (deadlineMode === 'preset' && deadlineHoursInput) {
+      deadlineSummaryText =
+        deadlineHoursInput === 3
+          ? 'In 3h'
+          : deadlineHoursInput === 24
+          ? 'Tomorrow (24h)'
+          : 'In 3 days';
+    } else if (deadlineMode === 'custom' && customDeadlineValue) {
+      deadlineSummaryText = `In ${customDeadlineValue} ${customDeadlineUnit}`;
+    } else if (deadlineMode === 'calendar') {
+      const ts = computeCalendarTimestamp(calSelectedDateStr, calHourInput, calMinuteInput);
+      if (ts) deadlineSummaryText = formatDeadlineShort(new Date(ts));
+    }
+
+    let repeatSummaryText = 'One-time';
+    if (recurrenceTypeInput === 'daily') {
+      repeatSummaryText = 'Every day';
+    } else if (recurrenceTypeInput === 'weekly') {
+      repeatSummaryText = `${weeklyQuotaInput}x / week`;
+    }
+
+    return (
+      <View>
+        {/* Segmented Control: Deadline vs Repeat */}
+        <View style={styles.scheduleSegmentedBar}>
+          <TouchableOpacity
+            style={[
+              styles.scheduleSegmentTab,
+              scheduleSubTab === 'deadline' && styles.scheduleSegmentTabActive,
+            ]}
+            activeOpacity={0.85}
+            onPress={() => {
+              configureSmoothLayout();
+              setScheduleSubTab('deadline');
+            }}
+          >
+            <View style={styles.rowCenter}>
+              <Text
+                style={[
+                  styles.scheduleSegmentTabText,
+                  scheduleSubTab === 'deadline' && styles.scheduleSegmentTabTextActive,
+                ]}
+              >
+                Deadline
+              </Text>
+              {hasActiveDeadline && <View style={styles.scheduleActiveDot} />}
+            </View>
+            <Text style={styles.scheduleSegmentSubText} numberOfLines={1}>
+              {deadlineSummaryText}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.scheduleSegmentTab,
+              scheduleSubTab === 'repeat' && styles.scheduleSegmentTabActive,
+            ]}
+            activeOpacity={0.85}
+            onPress={() => {
+              configureSmoothLayout();
+              setScheduleSubTab('repeat');
+            }}
+          >
+            <View style={styles.rowCenter}>
+              <Text
+                style={[
+                  styles.scheduleSegmentTabText,
+                  scheduleSubTab === 'repeat' && styles.scheduleSegmentTabTextActive,
+                ]}
+              >
+                Repeat
+              </Text>
+              {hasActiveRepeat && <View style={styles.scheduleActiveDot} />}
+            </View>
+            <Text style={styles.scheduleSegmentSubText} numberOfLines={1}>
+              {repeatSummaryText}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Sub-tab 1: Deadline Options */}
+        {scheduleSubTab === 'deadline' ? (
+          <View>
+            <View style={styles.scheduleModeGrid}>
+              {[
+                { key: 'none', label: 'None', hrs: null },
+                { key: 'preset-3', label: '+3h', mode: 'preset', hrs: 3 },
+                { key: 'preset-24', label: '+24h', mode: 'preset', hrs: 24 },
+                { key: 'preset-72', label: '+3d', mode: 'preset', hrs: 72 },
+                { key: 'custom', label: 'Custom', mode: 'custom' },
+                { key: 'calendar', label: 'Calendar', mode: 'calendar' },
+              ].map((opt) => {
+                const isSelected =
+                  (opt.key === 'none' && deadlineMode === 'none') ||
+                  (opt.mode === 'preset' &&
+                    deadlineMode === 'preset' &&
+                    deadlineHoursInput === opt.hrs) ||
+                  (opt.mode === 'custom' && deadlineMode === 'custom') ||
+                  (opt.mode === 'calendar' && deadlineMode === 'calendar');
+
+                return (
+                  <TouchableOpacity
+                    key={opt.key}
+                    style={[
+                      styles.scheduleCleanPill,
+                      isSelected && styles.scheduleCleanPillActive,
+                    ]}
+                    onPress={() => {
+                      configureSmoothLayout();
+                      if (opt.key === 'none') {
+                        setDeadlineMode('none');
+                        setDeadlineHoursInput(null);
+                      } else if (opt.mode === 'preset') {
+                        if (isSelected) {
+                          setDeadlineMode('none');
+                          setDeadlineHoursInput(null);
+                        } else {
+                          setDeadlineMode('preset');
+                          setDeadlineHoursInput(opt.hrs);
+                        }
+                      } else {
+                        setDeadlineMode(isSelected ? 'none' : opt.mode);
+                      }
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.scheduleCleanPillText,
+                        isSelected && styles.scheduleCleanPillTextActive,
+                      ]}
+                    >
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {deadlineMode === 'custom' && (
+              <View style={styles.customTimeRow}>
+                <TextInput
+                  style={styles.customTimeInput}
+                  placeholder="Duration..."
+                  placeholderTextColor="#787882"
+                  keyboardType="numeric"
+                  value={customDeadlineValue}
+                  onChangeText={setCustomDeadlineValue}
+                />
+                {['hours', 'days'].map((unit) => (
+                  <TouchableOpacity
+                    key={unit}
+                    style={[
+                      styles.unitChip,
+                      customDeadlineUnit === unit && styles.smallChipActive,
+                    ]}
+                    onPress={() => setCustomDeadlineUnit(unit)}
+                  >
+                    <Text style={styles.smallChipText}>{unit}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+
+            {deadlineMode === 'calendar' && renderCalendarAndTimePicker()}
+          </View>
+        ) : (
+          /* Sub-tab 2: Repeat / Habit Options */
+          <View>
+            <View style={styles.scheduleRepeatRow}>
+              {[
+                { type: 'none', label: 'One-time' },
+                { type: 'daily', label: 'Daily' },
+                { type: 'weekly', label: 'Weekly goal' },
+              ].map((r) => {
+                const active = recurrenceTypeInput === r.type;
+                return (
+                  <TouchableOpacity
+                    key={r.type}
+                    style={[
+                      styles.scheduleRepeatTypeBtn,
+                      active && styles.scheduleCleanPillActive,
+                    ]}
+                    onPress={() => {
+                      configureSmoothLayout();
+                      setRecurrenceTypeInput(r.type);
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.scheduleCleanPillText,
+                        active && styles.scheduleCleanPillTextActive,
+                      ]}
+                    >
+                      {r.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {recurrenceTypeInput === 'weekly' && (
+              <View style={styles.weeklyGoalCard}>
+                <View style={styles.weeklyGoalSection}>
+                  <Text style={styles.weeklyCompactLabel}>
+                    Sessions per week: <Text style={{ color: '#FFF', fontWeight: '700' }}>{weeklyQuotaInput}x</Text>
+                  </Text>
+                  <View style={styles.weeklyEqualRow}>
+                    {[1, 2, 3, 4, 5, 6].map((num) => {
+                      const active = weeklyQuotaInput === num;
+                      return (
+                        <TouchableOpacity
+                          key={num}
+                          style={[
+                            styles.weeklyEqualPill,
+                            active && styles.smallChipActive,
+                          ]}
+                          onPress={() => setWeeklyQuotaInput(num)}
+                        >
+                          <Text
+                            style={[
+                              styles.smallChipText,
+                              active && { fontWeight: '700' },
+                            ]}
+                          >
+                            {num}x
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+
+                <View style={styles.weeklyGoalDivider} />
+
+                <View style={styles.weeklyGoalSection}>
+                  <Text style={styles.weeklyCompactLabel}>Target days:</Text>
+                  <View style={styles.weeklyEqualRow}>
+                    {WEEK_DAYS.map((d) => {
+                      const selected = targetDaysInput.includes(d.id);
+                      return (
+                        <TouchableOpacity
+                          key={d.id}
+                          style={[
+                            styles.weeklyEqualPill,
+                            selected && styles.smallChipActive,
+                          ]}
+                          onPress={() => {
+                            if (selected) {
+                              setTargetDaysInput(
+                                targetDaysInput.filter((x) => x !== d.id)
+                              );
+                            } else {
+                              setTargetDaysInput([...targetDaysInput, d.id]);
+                            }
+                          }}
+                        >
+                          <Text
+                            style={[
+                              styles.smallChipText,
+                              { fontSize: 12 },
+                              selected && { fontWeight: '700' },
+                            ]}
+                          >
+                            {d.short}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+              </View>
+            )}
+          </View>
+        )}
       </View>
     );
   };
@@ -2369,7 +2709,12 @@ export default function App() {
     return (
       <>
         {/* 3 Dots Menu (⋮) with One UI Scale + Opacity Animation */}
-        <Modal visible={moreMenuVisible} transparent animationType="none">
+        <Modal
+          visible={moreMenuVisible}
+          transparent
+          animationType="none"
+          onRequestClose={() => setMoreMenuVisible(false)}
+        >
           <Pressable
             style={styles.popoverBackdrop}
             onPress={() => setMoreMenuVisible(false)}
@@ -2424,7 +2769,12 @@ export default function App() {
         </Modal>
 
         {/* Sort By Submenu */}
-        <Modal visible={sortMenuVisible} transparent animationType="none">
+        <Modal
+          visible={sortMenuVisible}
+          transparent
+          animationType="none"
+          onRequestClose={() => setSortMenuVisible(false)}
+        >
           <Pressable
             style={styles.popoverBackdrop}
             onPress={() => setSortMenuVisible(false)}
@@ -2618,11 +2968,17 @@ export default function App() {
                   { id: 'category', icon: '☰' },
                 ].map((btn) => {
                   const active = activeSheetPanel === btn.id;
+                  const hasScheduleIndicator =
+                    btn.id === 'schedule' &&
+                    (deadlineMode !== 'none' || recurrenceTypeInput !== 'none');
                   return (
                     <TouchableOpacity
                       key={btn.id}
                       style={[
                         styles.circleActionBtn,
+                        hasScheduleIndicator &&
+                          !active &&
+                          styles.circleActionBtnSubtleActive,
                         active && styles.circleActionBtnActive,
                       ]}
                       onPress={() => {
@@ -2772,167 +3128,8 @@ export default function App() {
                       </View>
                     )}
 
-                    {/* Schedule / Deadline Panel with Calendar & Time Picker */}
-                    {activeSheetPanel === 'schedule' && (
-                      <View>
-                        <Text style={styles.panelSubLabel}>
-                          Deadline (Quick Presets or Calendar & Time):
-                        </Text>
-                        <View style={styles.chipsWrapRow}>
-                          {[
-                            { hrs: 3, label: 'In 3 hours' },
-                            { hrs: 24, label: 'Tomorrow (24h)' },
-                            { hrs: 72, label: 'In 3 days' },
-                          ].map((p) => {
-                            const active =
-                              deadlineMode === 'preset' && deadlineHoursInput === p.hrs;
-                            return (
-                              <TouchableOpacity
-                                key={String(p.hrs)}
-                                style={[styles.smallChip, active && styles.smallChipActive]}
-                                onPress={() => {
-                                  configureSmoothLayout();
-                                  if (active) {
-                                    setDeadlineMode('none');
-                                    setDeadlineHoursInput(null);
-                                  } else {
-                                    setDeadlineMode('preset');
-                                    setDeadlineHoursInput(p.hrs);
-                                  }
-                                }}
-                              >
-                                <Text style={styles.smallChipText}>{p.label}</Text>
-                              </TouchableOpacity>
-                            );
-                          })}
-
-                          <TouchableOpacity
-                            style={[
-                              styles.smallChip,
-                              deadlineMode === 'calendar' && styles.smallChipActive,
-                            ]}
-                            onPress={() => {
-                              configureSmoothLayout();
-                              setDeadlineMode(deadlineMode === 'calendar' ? 'none' : 'calendar');
-                            }}
-                          >
-                            <Text style={styles.smallChipText}>📅 Calendar & Time</Text>
-                          </TouchableOpacity>
-
-                          <TouchableOpacity
-                            style={[
-                              styles.smallChip,
-                              deadlineMode === 'custom' && styles.smallChipActive,
-                            ]}
-                            onPress={() => {
-                              configureSmoothLayout();
-                              setDeadlineMode(deadlineMode === 'custom' ? 'none' : 'custom');
-                            }}
-                          >
-                            <Text style={styles.smallChipText}>Custom duration...</Text>
-                          </TouchableOpacity>
-                        </View>
-
-                        {deadlineMode === 'calendar' && renderCalendarAndTimePicker()}
-
-                        {deadlineMode === 'custom' && (
-                          <View style={styles.customTimeRow}>
-                            <TextInput
-                              style={styles.customTimeInput}
-                              placeholder="Enter time..."
-                              placeholderTextColor="#787882"
-                              keyboardType="numeric"
-                              value={customDeadlineValue}
-                              onChangeText={setCustomDeadlineValue}
-                            />
-                            {['hours', 'days'].map((unit) => (
-                              <TouchableOpacity
-                                key={unit}
-                                style={[
-                                  styles.unitChip,
-                                  customDeadlineUnit === unit && styles.smallChipActive,
-                                ]}
-                                onPress={() => setCustomDeadlineUnit(unit)}
-                              >
-                                <Text style={styles.smallChipText}>{unit}</Text>
-                              </TouchableOpacity>
-                            ))}
-                          </View>
-                        )}
-
-                        <Text style={[styles.panelSubLabel, { marginTop: 12 }]}>
-                          Repeat / Habit:
-                        </Text>
-                        <View style={styles.chipsWrapRow}>
-                          {[
-                            { type: 'none', label: "Don't repeat" },
-                            { type: 'daily', label: 'Daily' },
-                            { type: 'weekly', label: 'X times / week' },
-                          ].map((r) => {
-                            const active = recurrenceTypeInput === r.type;
-                            return (
-                              <TouchableOpacity
-                                key={r.type}
-                                style={[styles.smallChip, active && styles.smallChipActive]}
-                                onPress={() => {
-                                  configureSmoothLayout();
-                                  setRecurrenceTypeInput(r.type);
-                                }}
-                              >
-                                <Text style={styles.smallChipText}>{r.label}</Text>
-                              </TouchableOpacity>
-                            );
-                          })}
-                        </View>
-
-                        {recurrenceTypeInput === 'weekly' && (
-                          <View style={{ marginTop: 8 }}>
-                            <Text style={styles.panelSubLabel}>
-                              Weekly goal: {weeklyQuotaInput}x per week (Target days):
-                            </Text>
-                            <View style={styles.chipsWrapRow}>
-                              {[1, 2, 3, 4, 5, 6].map((num) => (
-                                <TouchableOpacity
-                                  key={num}
-                                  style={[
-                                    styles.dayCircleBtn,
-                                    weeklyQuotaInput === num && styles.smallChipActive,
-                                  ]}
-                                  onPress={() => setWeeklyQuotaInput(num)}
-                                >
-                                  <Text style={styles.smallChipText}>{num}x</Text>
-                                </TouchableOpacity>
-                              ))}
-                            </View>
-                            <View style={[styles.chipsWrapRow, { marginTop: 6 }]}>
-                              {WEEK_DAYS.map((d) => {
-                                const selected = targetDaysInput.includes(d.id);
-                                return (
-                                  <TouchableOpacity
-                                    key={d.id}
-                                    style={[
-                                      styles.dayCircleBtn,
-                                      selected && styles.smallChipActive,
-                                    ]}
-                                    onPress={() => {
-                                      if (selected) {
-                                        setTargetDaysInput(
-                                          targetDaysInput.filter((x) => x !== d.id)
-                                        );
-                                      } else {
-                                        setTargetDaysInput([...targetDaysInput, d.id]);
-                                      }
-                                    }}
-                                  >
-                                    <Text style={styles.smallChipText}>{d.short}</Text>
-                                  </TouchableOpacity>
-                                );
-                              })}
-                            </View>
-                          </View>
-                        )}
-                      </View>
-                    )}
+                    {/* Reorganized Schedule Panel (Clean Segmented Deadline & Repeat Tabs) */}
+                    {activeSheetPanel === 'schedule' && renderSchedulePanel()}
                   </View>
                 </ScrollView>
               )}
@@ -2941,7 +3138,12 @@ export default function App() {
         </Modal>
 
         {/* Batch Move to Category Modal */}
-        <Modal visible={moveCategoryModal} transparent animationType="fade">
+        <Modal
+          visible={moveCategoryModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setMoveCategoryModal(false)}
+        >
           <Pressable
             style={styles.popoverBackdrop}
             onPress={() => setMoveCategoryModal(false)}
@@ -2970,7 +3172,12 @@ export default function App() {
         </Modal>
 
         {/* Add / Edit Category Modal */}
-        <Modal visible={catModalVisible} transparent animationType="fade">
+        <Modal
+          visible={catModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setCatModalVisible(false)}
+        >
           <Pressable
             style={styles.popoverBackdrop}
             onPress={() => setCatModalVisible(false)}
@@ -3020,7 +3227,12 @@ export default function App() {
         </Modal>
 
         {/* Doing Mode (Freeze) Timer Setup Modal */}
-        <Modal visible={doingSetupModal} transparent animationType="fade">
+        <Modal
+          visible={doingSetupModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setDoingSetupModal(false)}
+        >
           <Pressable
             style={styles.popoverBackdrop}
             onPress={() => setDoingSetupModal(false)}
@@ -3976,7 +4188,7 @@ const styles = StyleSheet.create({
     color: '#FFF',
   },
   sheetExpandedScroll: {
-    maxHeight: 370,
+    maxHeight: 380,
   },
   sheetExpandedArea: {
     marginTop: 10,
@@ -4065,37 +4277,134 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#B0B0B8',
   },
-  // Calendar & Specific Time Styles
-  calendarCard: {
-    backgroundColor: '#191920',
-    borderRadius: 20,
-    padding: 14,
-    marginTop: 4,
-    marginBottom: 8,
+  // Reorganized Schedule Panel Styles (Segmented Control & Clean Pills)
+  scheduleSegmentedBar: {
+    flexDirection: 'row',
+    backgroundColor: '#18181F',
+    borderRadius: 16,
+    padding: 4,
+    marginBottom: 12,
   },
-  calQuickDaysRow: {
+  scheduleSegmentTab: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  scheduleSegmentTabActive: {
+    backgroundColor: '#2B2B35',
+  },
+  scheduleSegmentTabText: {
+    fontSize: 13.5,
+    fontWeight: '600',
+    color: '#8E8E98',
+  },
+  scheduleSegmentTabTextActive: {
+    color: '#FFFFFF',
+  },
+  scheduleSegmentSubText: {
+    fontSize: 11,
+    color: '#C5A888',
+    marginTop: 2,
+  },
+  scheduleActiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#C5A888',
+    marginLeft: 6,
+  },
+  scheduleModeGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    marginBottom: 10,
+    justifyContent: 'space-between',
+    marginBottom: 4,
   },
-  calQuickChip: {
-    backgroundColor: '#2C2C35',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+  scheduleCleanPill: {
+    width: '31.8%',
+    backgroundColor: '#2B2B34',
+    paddingVertical: 10,
     borderRadius: 14,
-    marginRight: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  scheduleCleanPillActive: {
+    backgroundColor: '#8C8275',
+  },
+  scheduleCleanPillText: {
+    fontSize: 13,
+    color: '#D1D1D8',
+    fontWeight: '500',
+  },
+  scheduleCleanPillTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+  scheduleRepeatRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  scheduleRepeatTypeBtn: {
+    width: '31.8%',
+    backgroundColor: '#2B2B34',
+    paddingVertical: 11,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  weeklyGoalCard: {
+    backgroundColor: '#191920',
+    borderRadius: 18,
+    padding: 14,
+    marginTop: 4,
+  },
+  weeklyGoalSection: {
+    marginVertical: 2,
+  },
+  weeklyGoalDivider: {
+    height: 1,
+    backgroundColor: '#272732',
+    marginVertical: 12,
+  },
+  weeklyCompactLabel: {
+    fontSize: 12.5,
+    color: '#9A9AA6',
+    marginBottom: 8,
+  },
+  weeklyEqualRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  weeklyEqualPill: {
+    flex: 1,
+    height: 34,
+    backgroundColor: '#2B2B35',
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 2.5,
+  },
+  // Streamlined Calendar & Specific Time Styles
+  calendarCard: {
+    backgroundColor: '#191920',
+    borderRadius: 18,
+    padding: 12,
+    marginTop: 2,
     marginBottom: 6,
   },
   calMonthHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
     paddingHorizontal: 4,
   },
   calNavBtn: {
     paddingHorizontal: 12,
-    paddingVertical: 4,
+    paddingVertical: 2,
   },
   calNavArrow: {
     fontSize: 22,
@@ -4103,19 +4412,19 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   calMonthTitle: {
-    fontSize: 15,
+    fontSize: 14.5,
     fontWeight: '700',
     color: '#FFFFFF',
   },
   calWeekRow: {
     flexDirection: 'row',
     justifyContent: 'space-around',
-    marginBottom: 6,
+    marginBottom: 4,
   },
   calWeekHeaderText: {
     width: '14.2%',
     textAlign: 'center',
-    fontSize: 11.5,
+    fontSize: 11,
     fontWeight: '600',
     color: '#787885',
   },
@@ -4125,10 +4434,10 @@ const styles = StyleSheet.create({
   },
   calDayCell: {
     width: '14.28%',
-    height: 34,
+    height: 32,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 17,
+    borderRadius: 16,
     marginBottom: 2,
   },
   calDayCellToday: {
@@ -4139,65 +4448,81 @@ const styles = StyleSheet.create({
     backgroundColor: '#C5B4A0',
   },
   calDayText: {
-    fontSize: 13.5,
+    fontSize: 13,
     color: '#EAEAEF',
   },
   calTimeSection: {
-    marginTop: 10,
+    marginTop: 8,
     paddingTop: 10,
     borderTopWidth: 1,
-    borderTopColor: '#2A2A35',
+    borderTopColor: '#272732',
   },
   calTimeHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 6,
+  },
+  calQuickTimesGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  calMiniTimeChip: {
+    backgroundColor: '#2B2B35',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 10,
+    marginRight: 5,
+  },
+  calMiniTimeChipText: {
+    fontSize: 11.5,
+    color: '#EAEAEF',
+    fontWeight: '600',
   },
   calTimeStepperRow: {
     flexDirection: 'row',
     alignItems: 'center',
   },
   timeStepBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
     backgroundColor: '#2C2C35',
     alignItems: 'center',
     justifyContent: 'center',
   },
   timeStepBtnText: {
     color: '#FFF',
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
   },
   calTimeBoxInput: {
-    width: 40,
-    height: 32,
+    width: 36,
+    height: 30,
     backgroundColor: '#121217',
     borderRadius: 8,
     color: '#FFF',
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
     textAlign: 'center',
-    marginHorizontal: 4,
+    marginHorizontal: 3,
     paddingVertical: 0,
   },
   calTimeColon: {
     color: '#FFF',
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
-    marginHorizontal: 6,
+    marginHorizontal: 4,
   },
   calCountdownPreview: {
     backgroundColor: '#121217',
-    borderRadius: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginTop: 6,
+    borderRadius: 10,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    marginTop: 8,
+    alignItems: 'center',
   },
   calCountdownPreviewText: {
-    fontSize: 12.5,
+    fontSize: 12,
     color: '#B0B0B8',
   },
   sheetListRow: {
@@ -4377,7 +4702,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#191920',
     borderRadius: 14,
     paddingHorizontal: 12,
-    paddingVertical: 7,
+    paddingVertical: 8,
     color: '#FFF',
     fontSize: 14,
     marginRight: 8,
@@ -4388,16 +4713,6 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 14,
     marginLeft: 4,
-  },
-  dayCircleBtn: {
-    width: 40,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: '#33333C',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 6,
-    marginBottom: 6,
   },
   centerDialog: {
     backgroundColor: '#222228',
