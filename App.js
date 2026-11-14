@@ -30,6 +30,7 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const TOP_INSET = Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 10 : 14;
+const STAGE_2_OFFSET = 145; // Exact scrollY where Expanded Header collapses into Stage 2 Compact Header
 const STORAGE_TASKS_KEY = '@reminder_quests_tasks_v4';
 const STORAGE_CATS_KEY = '@reminder_quests_cats_v4';
 
@@ -88,8 +89,12 @@ export default function App() {
   const screenSlideAnim = useRef(new Animated.Value(0)).current;
   const screenFadeAnim = useRef(new Animated.Value(1)).current;
 
-  // One UI Collapsible Header & Scroll-to-Top state
+  // One UI 3-Stage Scroll & Brake ("Freio") states
   const scrollY = useRef(new Animated.Value(0)).current;
+  const currentScrollYRef = useRef(0);
+  const dragStartYRef = useRef(0);
+  const brakeArmedRef = useRef(false);
+  const isDraggingRef = useRef(false);
   const mainScrollRef = useRef(null);
   const subScrollRef = useRef(null);
   const [showScrollTopBtn, setShowScrollTopBtn] = useState(false);
@@ -147,7 +152,7 @@ export default function App() {
   const [focusMinutesInput, setFocusMinutesInput] = useState(30);
   const [urgencyInput, setUrgencyInput] = useState('normal');
 
-  // Schedule Sub-tab ('deadline' | 'repeat') for clean visual organization
+  // Schedule Sub-tab ('deadline' | 'repeat')
   const [scheduleSubTab, setScheduleSubTab] = useState('deadline');
 
   // Deadline states (3 presets + Custom duration + Calendar & Time picker)
@@ -422,6 +427,42 @@ export default function App() {
         useNativeDriver: true,
       }),
     ]).start();
+  };
+
+  // One UI 2-Step Scroll Brake ("Freio") & Header Snap Handler
+  const handleMainScrollBeginDrag = (e) => {
+    const y = e.nativeEvent.contentOffset.y;
+    dragStartYRef.current = y;
+    isDraggingRef.current = true;
+    // Arm the Stage 2 brake whenever the user starts scrolling up from below Stage 2
+    if (y > STAGE_2_OFFSET + 12) {
+      brakeArmedRef.current = true;
+    } else {
+      brakeArmedRef.current = false;
+    }
+  };
+
+  const handleMainScrollEndDrag = (e) => {
+    isDraggingRef.current = false;
+    const y = e.nativeEvent.contentOffset.y;
+    const vy = e.nativeEvent.velocity ? e.nativeEvent.velocity.y : 0;
+
+    // If user started inside the [0, STAGE_2_OFFSET] header zone and released without strong momentum
+    if (!brakeArmedRef.current && y > 0 && y < STAGE_2_OFFSET && Math.abs(vy) < 0.25) {
+      const targetSnap = y < STAGE_2_OFFSET * 0.5 ? 0 : STAGE_2_OFFSET;
+      mainScrollRef.current?.scrollTo({ y: targetSnap, animated: true });
+    }
+  };
+
+  const handleMainMomentumScrollEnd = (e) => {
+    const y = e.nativeEvent.contentOffset.y;
+    if (brakeArmedRef.current) {
+      brakeArmedRef.current = false;
+    }
+    if (y > 0 && y < STAGE_2_OFFSET) {
+      const targetSnap = y < STAGE_2_OFFSET * 0.5 ? 0 : STAGE_2_OFFSET;
+      mainScrollRef.current?.scrollTo({ y: targetSnap, animated: true });
+    }
   };
 
   // Dynamic Urgency & Critical State calculation
@@ -1451,7 +1492,6 @@ export default function App() {
 
     return (
       <View style={styles.stageBarContainer}>
-        {/* Progress Track & Nodes */}
         <View style={styles.stageTrackWrapper}>
           <View style={styles.stageTrackBackground}>
             <View
@@ -1510,7 +1550,6 @@ export default function App() {
           </View>
         </View>
 
-        {/* Active Stage Summary Pill */}
         <View style={styles.stageSummaryBox}>
           <View style={[styles.stageSummaryDot, { backgroundColor: currentStage.color }]} />
           <Text style={styles.stageSummaryText}>
@@ -1547,7 +1586,6 @@ export default function App() {
 
     return (
       <View style={styles.calendarCard}>
-        {/* Month Navigation Header */}
         <View style={styles.calMonthHeader}>
           <TouchableOpacity onPress={() => changeCalendarMonth(-1)} style={styles.calNavBtn}>
             <Text style={styles.calNavArrow}>‹</Text>
@@ -1560,7 +1598,6 @@ export default function App() {
           </TouchableOpacity>
         </View>
 
-        {/* Week Days Header */}
         <View style={styles.calWeekRow}>
           {CALENDAR_WEEK_HEADERS.map((w, idx) => (
             <Text key={idx} style={styles.calWeekHeaderText}>
@@ -1569,7 +1606,6 @@ export default function App() {
           ))}
         </View>
 
-        {/* Days Grid */}
         <View style={styles.calDaysGrid}>
           {dayCells.map((cell, idx) => {
             if (!cell) {
@@ -1601,7 +1637,6 @@ export default function App() {
           })}
         </View>
 
-        {/* Compact Time Bar: Quick Presets on Left + Stepper on Right */}
         <View style={styles.calTimeSection}>
           <View style={styles.calTimeHeaderRow}>
             <View style={styles.calQuickTimesGroup}>
@@ -1730,7 +1765,6 @@ export default function App() {
 
     return (
       <View>
-        {/* Segmented Control: Deadline vs Repeat */}
         <View style={styles.scheduleSegmentedBar}>
           <TouchableOpacity
             style={[
@@ -1787,7 +1821,6 @@ export default function App() {
           </TouchableOpacity>
         </View>
 
-        {/* Sub-tab 1: Deadline Options */}
         {scheduleSubTab === 'deadline' ? (
           <View>
             <View style={styles.scheduleModeGrid}>
@@ -1873,7 +1906,6 @@ export default function App() {
             {deadlineMode === 'calendar' && renderCalendarAndTimePicker()}
           </View>
         ) : (
-          /* Sub-tab 2: Repeat / Habit Options */
           <View>
             <View style={styles.scheduleRepeatRow}>
               {[
@@ -3128,7 +3160,7 @@ export default function App() {
                       </View>
                     )}
 
-                    {/* Reorganized Schedule Panel (Clean Segmented Deadline & Repeat Tabs) */}
+                    {/* Reorganized Schedule Panel */}
                     {activeSheetPanel === 'schedule' && renderSchedulePanel()}
                   </View>
                 </ScrollView>
@@ -3291,19 +3323,45 @@ export default function App() {
     );
   }
 
-  // Interpolations for One UI Collapsible Viewing Area
-  const expandedHeaderHeight = scrollY.interpolate({
-    inputRange: [0, 110],
-    outputRange: [92, 0],
-    extrapolate: 'clamp',
-  });
-  const expandedTitleOpacity = scrollY.interpolate({
-    inputRange: [0, 65],
+  // ============================================================================
+  // 3-STAGE ONE UI SCROLL INTERPOLATIONS (Stage 1 -> Stage 2 -> Stage 3)
+  // ============================================================================
+  // Stage 1: Large centered "Reminder" in expanded viewing area (scrollY = 0)
+  const stage1TitleOpacity = scrollY.interpolate({
+    inputRange: [0, STAGE_2_OFFSET * 0.68],
     outputRange: [1, 0],
     extrapolate: 'clamp',
   });
-  const compactTitleOpacity = scrollY.interpolate({
-    inputRange: [50, 95],
+  const stage1TitleTranslateY = scrollY.interpolate({
+    inputRange: [0, STAGE_2_OFFSET],
+    outputRange: [0, 24],
+    extrapolate: 'clamp',
+  });
+
+  // Stage 2 -> Stage 3: Small left-aligned "Reminder" right above the 3 top blocks
+  // Appears as Stage 1 collapses (around STAGE_2_OFFSET), then scrolls up and fades out in Stage 3
+  const stage2LeftTitleOpacity = scrollY.interpolate({
+    inputRange: [
+      STAGE_2_OFFSET * 0.55,
+      STAGE_2_OFFSET * 0.95,
+      STAGE_2_OFFSET + 35,
+      STAGE_2_OFFSET + 90,
+    ],
+    outputRange: [0, 1, 1, 0],
+    extrapolate: 'clamp',
+  });
+
+  // Search (🔍) & Menu (⋮) Icons:
+  // Start right above the 3 blocks (at y = STAGE_2_OFFSET), rise with scroll to y = 0 at Stage 2,
+  // and remain locked/sticky at y = 0 in Stage 3 with a rounded semi-transparent dark capsule
+  const floatingIconsTranslateY = scrollY.interpolate({
+    inputRange: [-120, 0, STAGE_2_OFFSET, STAGE_2_OFFSET + 2000],
+    outputRange: [STAGE_2_OFFSET + 120, STAGE_2_OFFSET, 0, 0],
+    extrapolate: 'clamp',
+  });
+
+  const stickyCapsuleBgOpacity = scrollY.interpolate({
+    inputRange: [STAGE_2_OFFSET, STAGE_2_OFFSET + 40],
     outputRange: [0, 1],
     extrapolate: 'clamp',
   });
@@ -3319,7 +3377,7 @@ export default function App() {
       <SafeAreaView style={styles.safeArea}>
         <StatusBar barStyle="light-content" backgroundColor="#0B0B12" translucent={false} />
 
-        {selectionMode ? (
+        {selectionMode && (
           <View style={styles.selectionHeader}>
             <TouchableOpacity
               style={styles.selectAllCircleWrap}
@@ -3355,39 +3413,39 @@ export default function App() {
               <Text style={styles.cancelTextBtn}>Cancel</Text>
             </TouchableOpacity>
           </View>
-        ) : (
-          <>
-            {/* One UI Expandable Viewing Area */}
-            <Animated.View
-              style={[
-                styles.oneUiExpandedHeader,
-                { height: expandedHeaderHeight, opacity: expandedTitleOpacity },
-              ]}
-            >
-              <Text style={styles.oneUiExpandedTitle}>Reminder</Text>
-            </Animated.View>
+        )}
 
-            {/* Compact Top Action Bar */}
-            <View style={styles.header}>
-              <Animated.Text style={[styles.headerTitle, { opacity: compactTitleOpacity }]}>
-                Reminder
-              </Animated.Text>
-              <View style={styles.headerIconsPill}>
-                <TouchableOpacity
-                  onPress={() => navigateToSubScreen('search')}
-                  style={styles.headerIconBtn}
-                >
-                  <Text style={styles.headerIconText}>🔍</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => openPopover('more')}
-                  style={styles.headerIconBtn}
-                >
-                  <Text style={styles.headerIconText}>⋮</Text>
-                </TouchableOpacity>
-              </View>
+        {/* Sticky / Floating Top-Right Search (🔍) & More (⋮) Capsule */}
+        {!selectionMode && (
+          <Animated.View
+            pointerEvents="box-none"
+            style={[
+              styles.stickyRightIconsContainer,
+              { transform: [{ translateY: floatingIconsTranslateY }] },
+            ]}
+          >
+            <View style={styles.stickyCapsuleWrapper}>
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.stickyCapsuleBackdrop,
+                  { opacity: stickyCapsuleBgOpacity },
+                ]}
+              />
+              <TouchableOpacity
+                onPress={() => navigateToSubScreen('search')}
+                style={styles.headerIconBtn}
+              >
+                <Text style={styles.headerIconText}>🔍</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => openPopover('more')}
+                style={styles.headerIconBtn}
+              >
+                <Text style={styles.headerIconText}>⋮</Text>
+              </TouchableOpacity>
             </View>
-          </>
+          </Animated.View>
         )}
 
         <Animated.ScrollView
@@ -3395,17 +3453,62 @@ export default function App() {
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
           scrollEventThrottle={16}
+          onScrollBeginDrag={handleMainScrollBeginDrag}
+          onScrollEndDrag={handleMainScrollEndDrag}
+          onMomentumScrollEnd={handleMainMomentumScrollEnd}
           onScroll={Animated.event(
             [{ nativeEvent: { contentOffset: { y: scrollY } } }],
             {
               useNativeDriver: false,
               listener: (e) => {
                 const offsetY = e.nativeEvent.contentOffset.y;
-                setShowScrollTopBtn(offsetY > 180);
+                currentScrollYRef.current = offsetY;
+                setShowScrollTopBtn(offsetY > STAGE_2_OFFSET + 140);
+
+                // Two-step Scroll Brake ("Freio"):
+                // If user scrolled up from deep in the list, stop & lock at Stage 2 first
+                if (brakeArmedRef.current && offsetY <= STAGE_2_OFFSET) {
+                  mainScrollRef.current?.scrollTo({ y: STAGE_2_OFFSET, animated: false });
+                  if (!isDraggingRef.current) {
+                    brakeArmedRef.current = false;
+                  }
+                }
               },
             }
           )}
         >
+          {/* Stage 1 & Stage 2 Collapsible Header Architecture */}
+          {!selectionMode && (
+            <View>
+              {/* Stage 1: Expanded Viewing Area with Large Centered "Reminder" */}
+              <Animated.View
+                style={[
+                  styles.stage1ExpandedArea,
+                  {
+                    opacity: stage1TitleOpacity,
+                    transform: [{ translateY: stage1TitleTranslateY }],
+                  },
+                ]}
+              >
+                <Text style={styles.oneUiExpandedTitle}>Reminder</Text>
+              </Animated.View>
+
+              {/* Stage 2: Compact Bar right above the 3 top blocks (scrolls up in Stage 3) */}
+              <View style={styles.stage2CompactBarRow}>
+                <Animated.Text
+                  style={[
+                    styles.headerTitle,
+                    { opacity: stage2LeftTitleOpacity },
+                  ]}
+                >
+                  Reminder
+                </Animated.Text>
+                {/* Spacer matching the floating icons on the right */}
+                <View style={{ width: 90, height: 36 }} />
+              </View>
+            </View>
+          )}
+
           {/* Strictly 3 Top Blocks: Scheduled, Backlog, Completed */}
           <View style={styles.bentoGridThree}>
             <TouchableOpacity
@@ -3471,11 +3574,14 @@ export default function App() {
           </View>
         </Animated.ScrollView>
 
-        {/* Scroll-to-Top Floating Button (^) */}
+        {/* Scroll-to-Top Floating Button (^) respects Stage 2 stop first */}
         {showScrollTopBtn && (
           <TouchableOpacity
             style={styles.scrollTopFloatingBtn}
-            onPress={() => mainScrollRef.current?.scrollTo({ y: 0, animated: true })}
+            onPress={() => {
+              brakeArmedRef.current = false;
+              mainScrollRef.current?.scrollTo({ y: STAGE_2_OFFSET, animated: true });
+            }}
           >
             <Text style={styles.scrollTopIcon}>⌃</Text>
           </TouchableOpacity>
@@ -3580,25 +3686,47 @@ const styles = StyleSheet.create({
     backgroundColor: '#0B0B12',
     paddingTop: TOP_INSET,
   },
-  oneUiExpandedHeader: {
+  // 3-Stage One UI Header Styles
+  stage1ExpandedArea: {
+    height: STAGE_2_OFFSET,
     alignItems: 'center',
-    justifyContent: 'flex-end',
-    paddingBottom: 8,
-    overflow: 'hidden',
+    justifyContent: 'center',
+    paddingTop: 18,
   },
   oneUiExpandedTitle: {
-    fontSize: 34,
+    fontSize: 36,
     fontWeight: '700',
     color: '#EAEAEF',
     letterSpacing: -0.4,
   },
-  header: {
+  stage2CompactBarRow: {
+    height: 52,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 14,
+    paddingHorizontal: 6,
+    marginBottom: 8,
+  },
+  stickyRightIconsContainer: {
+    position: 'absolute',
+    top: TOP_INSET + 6,
+    right: 16,
+    zIndex: 40,
+  },
+  stickyCapsuleWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 24,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    overflow: 'hidden',
+  },
+  stickyCapsuleBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(26, 26, 36, 0.88)',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
   },
   headerTitle: {
     fontSize: 24,
@@ -3616,8 +3744,8 @@ const styles = StyleSheet.create({
     borderColor: '#1F1F2A',
   },
   headerIconBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
   },
   headerIconText: {
     fontSize: 18,
@@ -3684,8 +3812,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     paddingHorizontal: 16,
-    paddingTop: 6,
-    paddingBottom: 140,
+    paddingBottom: 160,
   },
   bentoGridThree: {
     flexDirection: 'row',
@@ -4277,7 +4404,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#B0B0B8',
   },
-  // Reorganized Schedule Panel Styles (Segmented Control & Clean Pills)
+  // Reorganized Schedule Panel Styles
   scheduleSegmentedBar: {
     flexDirection: 'row',
     backgroundColor: '#18181F',
