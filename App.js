@@ -28,11 +28,54 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
-const SCREEN_WIDTH = Dimensions.get('window').width;
-const TOP_INSET = Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 10 : 14;
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const TOP_INSET = Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 10 : 48;
 const STAGE_2_OFFSET = 145; // Exact scrollY where Expanded Header collapses into Stage 2 Compact Header
 const STORAGE_TASKS_KEY = '@reminder_quests_tasks_v4';
 const STORAGE_CATS_KEY = '@reminder_quests_cats_v4';
+
+// Vertical slices for the atmospheric dark gradient background (midnight blue / deep purple -> black/graphite edges)
+const ATMOSPHERIC_BG_SLICES = [
+  '#04050A',
+  '#060812',
+  '#090D1E',
+  '#0E132B',
+  '#131434',
+  '#161438',
+  '#141332',
+  '#0F112A',
+  '#0B0D20',
+  '#080A16',
+  '#060710',
+  '#040408',
+];
+
+// Micro-slices for smooth top & bottom edge fade/blur masks over scrolling task cards
+const TOP_EDGE_FADE_STEPS = [
+  'rgba(4, 5, 10, 0.98)',
+  'rgba(5, 6, 12, 0.92)',
+  'rgba(6, 8, 15, 0.82)',
+  'rgba(7, 9, 18, 0.68)',
+  'rgba(8, 11, 21, 0.52)',
+  'rgba(9, 12, 24, 0.36)',
+  'rgba(10, 13, 26, 0.22)',
+  'rgba(10, 13, 26, 0.10)',
+  'rgba(10, 13, 26, 0.03)',
+  'rgba(10, 13, 26, 0.00)',
+];
+
+const BOTTOM_EDGE_FADE_STEPS = [
+  'rgba(4, 4, 8, 0.00)',
+  'rgba(4, 4, 8, 0.04)',
+  'rgba(4, 4, 8, 0.12)',
+  'rgba(4, 4, 8, 0.24)',
+  'rgba(4, 4, 8, 0.40)',
+  'rgba(4, 4, 8, 0.58)',
+  'rgba(4, 4, 8, 0.74)',
+  'rgba(4, 4, 8, 0.88)',
+  'rgba(4, 4, 8, 0.96)',
+  'rgba(4, 4, 8, 0.99)',
+];
 
 const WEEK_DAYS = [
   { id: 1, short: 'Mon' },
@@ -370,6 +413,58 @@ export default function App() {
     }
   };
 
+  // Atmospheric Dark Gradient Background Renderer (Midnight Blue & Deep Purple -> Dark Graphite/Black Edges)
+  const renderAtmosphericBackground = () => (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <View style={styles.gradientSlicesContainer}>
+        {ATMOSPHERIC_BG_SLICES.map((color, index) => (
+          <View key={index} style={{ flex: 1, backgroundColor: color }} />
+        ))}
+      </View>
+      {/* Diffused Midnight-Blue & Deep-Purple Atmospheric Glows in Upper/Central Zone */}
+      <View style={styles.atmosphericOrbTopBlue} />
+      <View style={styles.atmosphericOrbCenterPurple} />
+      <View style={styles.atmosphericOrbSubtleIndigo} />
+      {/* Vignette Edge Darkening for High Contrast */}
+      <View style={styles.atmosphericEdgeVignette} />
+    </View>
+  );
+
+  // Top & Bottom Edge Fade / Blur Mask Overlays restricted to the scrolling task layer
+  const renderEdgeFadeOverlays = (isHomeScreen = false) => {
+    const dynamicTopFadeOpacity = isHomeScreen
+      ? scrollY.interpolate({
+          inputRange: [0, 35, STAGE_2_OFFSET],
+          outputRange: [0.35, 0.75, 1],
+          extrapolate: 'clamp',
+        })
+      : 1;
+
+    return (
+      <>
+        {/* Top Edge Smoothing / Blur Mask */}
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.topEdgeFadeContainer,
+            { opacity: dynamicTopFadeOpacity },
+          ]}
+        >
+          {TOP_EDGE_FADE_STEPS.map((color, idx) => (
+            <View key={`top-fade-${idx}`} style={{ flex: 1, backgroundColor: color }} />
+          ))}
+        </Animated.View>
+
+        {/* Bottom Edge Smoothing / Blur Mask (tasks pass behind Add Reminder pill and fade at bottom edge) */}
+        <View pointerEvents="none" style={styles.bottomEdgeFadeContainer}>
+          {BOTTOM_EDGE_FADE_STEPS.map((color, idx) => (
+            <View key={`bot-fade-${idx}`} style={{ flex: 1, backgroundColor: color }} />
+          ))}
+        </View>
+      </>
+    );
+  };
+
   // Smooth horizontal screen transition helper
   const animateScreenTransition = (targetScreen, direction = 'forward') => {
     const startX = direction === 'forward' ? SCREEN_WIDTH * 0.28 : -SCREEN_WIDTH * 0.28;
@@ -434,7 +529,6 @@ export default function App() {
     const y = e.nativeEvent.contentOffset.y;
     dragStartYRef.current = y;
     isDraggingRef.current = true;
-    // Arm the Stage 2 brake whenever the user starts scrolling up from below Stage 2
     if (y > STAGE_2_OFFSET + 12) {
       brakeArmedRef.current = true;
     } else {
@@ -447,7 +541,6 @@ export default function App() {
     const y = e.nativeEvent.contentOffset.y;
     const vy = e.nativeEvent.velocity ? e.nativeEvent.velocity.y : 0;
 
-    // If user started inside the [0, STAGE_2_OFFSET] header zone and released without strong momentum
     if (!brakeArmedRef.current && y > 0 && y < STAGE_2_OFFSET && Math.abs(vy) < 0.25) {
       const targetSnap = y < STAGE_2_OFFSET * 0.5 ? 0 : STAGE_2_OFFSET;
       mainScrollRef.current?.scrollTo({ y: targetSnap, animated: true });
@@ -2035,7 +2128,8 @@ export default function App() {
           { opacity: screenFadeAnim, transform: [{ translateX: screenSlideAnim }] },
         ]}
       >
-        <SafeAreaView style={styles.safeArea}>
+        {renderAtmosphericBackground()}
+        <SafeAreaView style={styles.subScreenSafeContainer}>
           <View style={styles.subScreenHeader}>
             <TouchableOpacity
               onPress={() => navigateBack(previousScreen)}
@@ -2219,7 +2313,8 @@ export default function App() {
           { opacity: screenFadeAnim, transform: [{ translateX: screenSlideAnim }] },
         ]}
       >
-        <SafeAreaView style={styles.safeArea}>
+        {renderAtmosphericBackground()}
+        <SafeAreaView style={styles.subScreenSafeContainer}>
           {catSelectionMode ? (
             <View style={styles.selectionHeader}>
               <TouchableOpacity
@@ -2270,7 +2365,7 @@ export default function App() {
             </View>
           )}
 
-          <ScrollView contentContainerStyle={styles.scrollContent}>
+          <ScrollView contentContainerStyle={styles.subScrollContent}>
             <TouchableOpacity
               style={styles.reminderCard}
               onPress={() => {
@@ -2345,6 +2440,8 @@ export default function App() {
             })}
           </ScrollView>
 
+          {renderEdgeFadeOverlays(false)}
+
           {catSelectionMode && (
             <View style={styles.bottomActionPillWrapper}>
               <View style={styles.bottomActionPill}>
@@ -2409,7 +2506,8 @@ export default function App() {
           { opacity: screenFadeAnim, transform: [{ translateX: screenSlideAnim }] },
         ]}
       >
-        <SafeAreaView style={styles.safeArea}>
+        {renderAtmosphericBackground()}
+        <SafeAreaView style={styles.subScreenSafeContainer}>
           <View style={styles.subScreenHeader}>
             <View style={styles.rowCenter}>
               <TouchableOpacity onPress={() => navigateBack('home')} style={styles.backBtn}>
@@ -2419,7 +2517,7 @@ export default function App() {
             </View>
           </View>
 
-          <ScrollView contentContainerStyle={styles.scrollContent}>
+          <ScrollView contentContainerStyle={styles.subScrollContent}>
             <View style={styles.sectionHeaderRow}>
               <Text style={styles.sectionHeaderText}>Filters</Text>
               <TouchableOpacity
@@ -2464,6 +2562,8 @@ export default function App() {
               {filtered.map((t) => renderTaskCard(t, false, true, 'search'))}
             </View>
           </ScrollView>
+
+          {renderEdgeFadeOverlays(false)}
 
           <View style={styles.bottomFloatingWrapper}>
             <View style={styles.searchBottomBar}>
@@ -2515,7 +2615,8 @@ export default function App() {
           { opacity: screenFadeAnim, transform: [{ translateX: screenSlideAnim }] },
         ]}
       >
-        <SafeAreaView style={styles.safeArea}>
+        {renderAtmosphericBackground()}
+        <SafeAreaView style={styles.subScreenSafeContainer}>
           {selectionMode ? (
             <View style={styles.selectionHeader}>
               <TouchableOpacity
@@ -2582,7 +2683,8 @@ export default function App() {
 
           <ScrollView
             ref={subScrollRef}
-            contentContainerStyle={styles.scrollContent}
+            style={styles.fullScreenScrollView}
+            contentContainerStyle={styles.subScrollContent}
             onScroll={(e) => {
               const offsetY = e.nativeEvent.contentOffset.y;
               setShowScrollTopBtn(offsetY > 180);
@@ -2615,6 +2717,8 @@ export default function App() {
               renderSortedTaskList(currentList, currentScreen)
             )}
           </ScrollView>
+
+          {renderEdgeFadeOverlays(false)}
 
           {showScrollTopBtn && (
             <TouchableOpacity
@@ -3326,7 +3430,6 @@ export default function App() {
   // ============================================================================
   // 3-STAGE ONE UI SCROLL INTERPOLATIONS (Stage 1 -> Stage 2 -> Stage 3)
   // ============================================================================
-  // Stage 1: Large centered "Reminder" in expanded viewing area (scrollY = 0)
   const stage1TitleOpacity = scrollY.interpolate({
     inputRange: [0, STAGE_2_OFFSET * 0.68],
     outputRange: [1, 0],
@@ -3338,8 +3441,6 @@ export default function App() {
     extrapolate: 'clamp',
   });
 
-  // Stage 2 -> Stage 3: Small left-aligned "Reminder" right above the 3 top blocks
-  // Appears as Stage 1 collapses (around STAGE_2_OFFSET), then scrolls up and fades out in Stage 3
   const stage2LeftTitleOpacity = scrollY.interpolate({
     inputRange: [
       STAGE_2_OFFSET * 0.55,
@@ -3351,9 +3452,6 @@ export default function App() {
     extrapolate: 'clamp',
   });
 
-  // Search (🔍) & Menu (⋮) Icons:
-  // Start right above the 3 blocks (at y = STAGE_2_OFFSET), rise with scroll to y = 0 at Stage 2,
-  // and remain locked/sticky at y = 0 in Stage 3 with a rounded semi-transparent dark capsule
   const floatingIconsTranslateY = scrollY.interpolate({
     inputRange: [-120, 0, STAGE_2_OFFSET, STAGE_2_OFFSET + 2000],
     outputRange: [STAGE_2_OFFSET + 120, STAGE_2_OFFSET, 0, 0],
@@ -3374,11 +3472,14 @@ export default function App() {
         { opacity: screenFadeAnim, transform: [{ translateX: screenSlideAnim }] },
       ]}
     >
-      <SafeAreaView style={styles.safeArea}>
-        <StatusBar barStyle="light-content" backgroundColor="#0B0B12" translucent={false} />
+      {/* 1. Atmospheric Dark Gradient Background */}
+      {renderAtmosphericBackground()}
+
+      <View style={styles.homeFullScreenContainer}>
+        <StatusBar barStyle="light-content" backgroundColor="transparent" translucent={true} />
 
         {selectionMode && (
-          <View style={styles.selectionHeader}>
+          <View style={[styles.selectionHeader, { paddingTop: TOP_INSET + 10 }]}>
             <TouchableOpacity
               style={styles.selectAllCircleWrap}
               onPress={() => {
@@ -3415,42 +3516,14 @@ export default function App() {
           </View>
         )}
 
-        {/* Sticky / Floating Top-Right Search (🔍) & More (⋮) Capsule */}
-        {!selectionMode && (
-          <Animated.View
-            pointerEvents="box-none"
-            style={[
-              styles.stickyRightIconsContainer,
-              { transform: [{ translateY: floatingIconsTranslateY }] },
-            ]}
-          >
-            <View style={styles.stickyCapsuleWrapper}>
-              <Animated.View
-                pointerEvents="none"
-                style={[
-                  styles.stickyCapsuleBackdrop,
-                  { opacity: stickyCapsuleBgOpacity },
-                ]}
-              />
-              <TouchableOpacity
-                onPress={() => navigateToSubScreen('search')}
-                style={styles.headerIconBtn}
-              >
-                <Text style={styles.headerIconText}>🔍</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => openPopover('more')}
-                style={styles.headerIconBtn}
-              >
-                <Text style={styles.headerIconText}>⋮</Text>
-              </TouchableOpacity>
-            </View>
-          </Animated.View>
-        )}
-
+        {/* 2. Full-Height Scroll Container (100% of screen height from top edge to behind Add Reminder pill) */}
         <Animated.ScrollView
           ref={mainScrollRef}
-          contentContainerStyle={styles.scrollContent}
+          style={styles.fullScreenScrollView}
+          contentContainerStyle={[
+            styles.scrollContent,
+            !selectionMode && { paddingTop: TOP_INSET },
+          ]}
           showsVerticalScrollIndicator={false}
           scrollEventThrottle={16}
           onScrollBeginDrag={handleMainScrollBeginDrag}
@@ -3465,8 +3538,7 @@ export default function App() {
                 currentScrollYRef.current = offsetY;
                 setShowScrollTopBtn(offsetY > STAGE_2_OFFSET + 140);
 
-                // Two-step Scroll Brake ("Freio"):
-                // If user scrolled up from deep in the list, stop & lock at Stage 2 first
+                // Two-step Scroll Brake ("Freio") at Stage 2
                 if (brakeArmedRef.current && offsetY <= STAGE_2_OFFSET) {
                   mainScrollRef.current?.scrollTo({ y: STAGE_2_OFFSET, animated: false });
                   if (!isDraggingRef.current) {
@@ -3503,7 +3575,6 @@ export default function App() {
                 >
                   Reminder
                 </Animated.Text>
-                {/* Spacer matching the floating icons on the right */}
                 <View style={{ width: 90, height: 36 }} />
               </View>
             </View>
@@ -3554,25 +3625,64 @@ export default function App() {
             </TouchableOpacity>
           </View>
 
-          {/* Conditional "Selected" Section */}
-          {selectedSectionTasks.length > 0 && (
-            <View style={styles.sectionBlock}>
-              <View style={styles.sectionHeaderRow}>
-                <Text style={styles.sectionHeaderText}>Selected</Text>
+          {/* Lower Task Area Wrapper filling the remaining viewport */}
+          <View style={styles.lowerTasksFillContainer}>
+            {/* Conditional "Selected" Section */}
+            {selectedSectionTasks.length > 0 && (
+              <View style={styles.sectionBlock}>
+                <View style={styles.sectionHeaderRow}>
+                  <Text style={styles.sectionHeaderText}>Selected</Text>
+                </View>
+                {renderSortedTaskList(selectedSectionTasks, 'selected')}
               </View>
-              {renderSortedTaskList(selectedSectionTasks, 'selected')}
-            </View>
-          )}
+            )}
 
-          {/* Main Area: "All" Pending Tasks */}
-          <View style={styles.sectionBlock}>
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionHeaderText}>All</Text>
-            </View>
+            {/* Main Area: "All" Pending Tasks */}
+            <View style={[styles.sectionBlock, { flex: 1 }]}>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={styles.sectionHeaderText}>All</Text>
+              </View>
 
-            {renderSortedTaskList(allPendingTasks, 'all')}
+              {renderSortedTaskList(allPendingTasks, 'all')}
+            </View>
           </View>
         </Animated.ScrollView>
+
+        {/* 3. Top & Bottom Edge Fade / Blur Mask Overlays restricted to the scrolling task layer */}
+        {renderEdgeFadeOverlays(true)}
+
+        {/* Sticky / Floating Top-Right Search (🔍) & More (⋮) Capsule (Above edge fade mask) */}
+        {!selectionMode && (
+          <Animated.View
+            pointerEvents="box-none"
+            style={[
+              styles.stickyRightIconsContainer,
+              { transform: [{ translateY: floatingIconsTranslateY }] },
+            ]}
+          >
+            <View style={styles.stickyCapsuleWrapper}>
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.stickyCapsuleBackdrop,
+                  { opacity: stickyCapsuleBgOpacity },
+                ]}
+              />
+              <TouchableOpacity
+                onPress={() => navigateToSubScreen('search')}
+                style={styles.headerIconBtn}
+              >
+                <Text style={styles.headerIconText}>🔍</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => openPopover('more')}
+                style={styles.headerIconBtn}
+              >
+                <Text style={styles.headerIconText}>⋮</Text>
+              </TouchableOpacity>
+            </View>
+          </Animated.View>
+        )}
 
         {/* Scroll-to-Top Floating Button (^) respects Stage 2 stop first */}
         {showScrollTopBtn && (
@@ -3603,7 +3713,7 @@ export default function App() {
         )}
 
         {renderAllModals()}
-      </SafeAreaView>
+      </View>
     </Animated.View>
   );
 }
@@ -3683,8 +3793,73 @@ function formatStopwatch(ms) {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#0B0B12',
+    backgroundColor: '#04050A',
+  },
+  homeFullScreenContainer: {
+    flex: 1,
+  },
+  subScreenSafeContainer: {
+    flex: 1,
     paddingTop: TOP_INSET,
+  },
+  fullScreenScrollView: {
+    flex: 1,
+  },
+  // Atmospheric Dark Gradient Background Styles
+  gradientSlicesContainer: {
+    ...StyleSheet.absoluteFillObject,
+    flexDirection: 'column',
+  },
+  atmosphericOrbTopBlue: {
+    position: 'absolute',
+    top: -SCREEN_WIDTH * 0.25,
+    left: SCREEN_WIDTH * 0.08,
+    width: SCREEN_WIDTH * 0.88,
+    height: SCREEN_WIDTH * 0.88,
+    borderRadius: SCREEN_WIDTH * 0.44,
+    backgroundColor: 'rgba(38, 72, 165, 0.16)',
+  },
+  atmosphericOrbCenterPurple: {
+    position: 'absolute',
+    top: SCREEN_HEIGHT * 0.14,
+    right: -SCREEN_WIDTH * 0.18,
+    width: SCREEN_WIDTH * 0.92,
+    height: SCREEN_WIDTH * 0.92,
+    borderRadius: SCREEN_WIDTH * 0.46,
+    backgroundColor: 'rgba(98, 48, 162, 0.13)',
+  },
+  atmosphericOrbSubtleIndigo: {
+    position: 'absolute',
+    top: SCREEN_HEIGHT * 0.34,
+    left: -SCREEN_WIDTH * 0.22,
+    width: SCREEN_WIDTH * 0.8,
+    height: SCREEN_WIDTH * 0.8,
+    borderRadius: SCREEN_WIDTH * 0.4,
+    backgroundColor: 'rgba(45, 85, 180, 0.09)',
+  },
+  atmosphericEdgeVignette: {
+    ...StyleSheet.absoluteFillObject,
+    borderWidth: 18,
+    borderColor: 'rgba(3, 3, 7, 0.38)',
+  },
+  // Edge Fade / Blur Mask Overlays (Restricted to Task Scrolling Layer)
+  topEdgeFadeContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: TOP_INSET + 38,
+    zIndex: 25,
+    flexDirection: 'column',
+  },
+  bottomEdgeFadeContainer: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 92,
+    zIndex: 25,
+    flexDirection: 'column',
   },
   // 3-Stage One UI Header Styles
   stage1ExpandedArea: {
@@ -3696,7 +3871,7 @@ const styles = StyleSheet.create({
   oneUiExpandedTitle: {
     fontSize: 36,
     fontWeight: '700',
-    color: '#EAEAEF',
+    color: '#F4F4F8',
     letterSpacing: -0.4,
   },
   stage2CompactBarRow: {
@@ -3711,7 +3886,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: TOP_INSET + 6,
     right: 16,
-    zIndex: 40,
+    zIndex: 50,
   },
   stickyCapsuleWrapper: {
     flexDirection: 'row',
@@ -3723,25 +3898,25 @@ const styles = StyleSheet.create({
   },
   stickyCapsuleBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(26, 26, 36, 0.88)',
+    backgroundColor: 'rgba(20, 21, 32, 0.90)',
     borderRadius: 24,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: 'rgba(255, 255, 255, 0.12)',
   },
   headerTitle: {
     fontSize: 24,
     fontWeight: '700',
-    color: '#EAEAEF',
+    color: '#F4F4F8',
   },
   headerIconsPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#16161E',
+    backgroundColor: 'rgba(22, 23, 34, 0.92)',
     borderRadius: 22,
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderWidth: 1,
-    borderColor: '#1F1F2A',
+    borderColor: 'rgba(255, 255, 255, 0.08)',
   },
   headerIconBtn: {
     paddingHorizontal: 9,
@@ -3749,16 +3924,17 @@ const styles = StyleSheet.create({
   },
   headerIconText: {
     fontSize: 18,
-    color: '#EAEAEF',
+    color: '#F4F4F8',
   },
   subScreenHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: 18,
-    paddingBottom: 18,
+    paddingTop: 14,
+    paddingBottom: 16,
     marginBottom: 4,
+    zIndex: 40,
   },
   rowCenter: {
     flexDirection: 'row',
@@ -3770,49 +3946,61 @@ const styles = StyleSheet.create({
   },
   backArrow: {
     fontSize: 32,
-    color: '#EAEAEF',
+    color: '#F4F4F8',
     fontWeight: '300',
     marginTop: -4,
   },
   subScreenTitle: {
     fontSize: 23,
     fontWeight: '700',
-    color: '#EAEAEF',
+    color: '#F4F4F8',
   },
   starIcon: {
     fontSize: 24,
-    color: '#EAEAEF',
+    color: '#F4F4F8',
   },
   selectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: 18,
+    paddingTop: 14,
     paddingBottom: 16,
     marginBottom: 4,
+    zIndex: 50,
   },
   selectAllCircleWrap: {
     alignItems: 'center',
   },
   selectAllSmallText: {
     fontSize: 11,
-    color: '#9A9AA6',
+    color: '#A4A4B2',
     marginTop: 2,
   },
   selectionTitle: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#EAEAEF',
+    color: '#F4F4F8',
   },
   cancelTextBtn: {
     fontSize: 17,
     fontWeight: '600',
-    color: '#EAEAEF',
+    color: '#F4F4F8',
   },
   scrollContent: {
+    flexGrow: 1,
     paddingHorizontal: 16,
-    paddingBottom: 160,
+    paddingBottom: 155,
+  },
+  subScrollContent: {
+    flexGrow: 1,
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    paddingBottom: 155,
+  },
+  lowerTasksFillContainer: {
+    flex: 1,
+    minHeight: SCREEN_HEIGHT * 0.56,
   },
   bentoGridThree: {
     flexDirection: 'row',
@@ -3821,9 +4009,11 @@ const styles = StyleSheet.create({
   },
   bentoBox: {
     width: '31.5%',
-    backgroundColor: '#16161E',
+    backgroundColor: 'rgba(23, 24, 36, 0.92)',
     borderRadius: 22,
     padding: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.07)',
   },
   bentoIconCircle: {
     width: 28,
@@ -3844,7 +4034,7 @@ const styles = StyleSheet.create({
   },
   bentoLabel: {
     fontSize: 12.5,
-    color: '#9A9AA6',
+    color: '#A8A8B6',
     fontWeight: '500',
   },
   bentoCount: {
@@ -3865,7 +4055,7 @@ const styles = StyleSheet.create({
   sectionHeaderText: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#9A9AA6',
+    color: '#A8A8B6',
   },
   groupSection: {
     marginBottom: 20,
@@ -3873,39 +4063,43 @@ const styles = StyleSheet.create({
   groupHeaderLabel: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#9A9AA6',
+    color: '#A8A8B6',
     marginLeft: 8,
     marginBottom: 10,
   },
   groupedCardContainer: {
-    backgroundColor: '#16161E',
+    backgroundColor: 'rgba(23, 24, 36, 0.93)',
     borderRadius: 24,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
   },
   groupedReminderRow: {
     backgroundColor: 'transparent',
   },
   groupedRowDivider: {
     borderBottomWidth: 1,
-    borderBottomColor: '#252530',
+    borderBottomColor: 'rgba(255, 255, 255, 0.06)',
   },
   reminderCard: {
-    backgroundColor: '#16161E',
+    backgroundColor: 'rgba(23, 24, 36, 0.93)',
     borderRadius: 22,
     marginBottom: 10,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
   },
   reminderCardInSelectedHighlight: {
     borderWidth: 1,
-    borderColor: '#5A534A',
-    backgroundColor: '#191922',
+    borderColor: '#6E6458',
+    backgroundColor: 'rgba(28, 29, 42, 0.95)',
   },
   reminderCardDoing: {
     borderWidth: 1,
     borderColor: '#C5A888',
   },
   reminderCardSelected: {
-    backgroundColor: '#2B2B36',
+    backgroundColor: 'rgba(45, 46, 62, 0.96)',
   },
   selectedIndicatorBadge: {
     backgroundColor: 'rgba(197, 168, 136, 0.16)',
@@ -3932,7 +4126,7 @@ const styles = StyleSheet.create({
     height: 22,
     borderRadius: 11,
     borderWidth: 1.8,
-    borderColor: '#787885',
+    borderColor: '#848494',
     marginRight: 14,
     marginTop: 2,
     alignItems: 'center',
@@ -3943,7 +4137,7 @@ const styles = StyleSheet.create({
     height: 18,
     borderRadius: 9,
     borderWidth: 1.6,
-    borderColor: '#787885',
+    borderColor: '#848494',
     marginRight: 10,
     alignItems: 'center',
     justifyContent: 'center',
@@ -3973,7 +4167,7 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 17,
     fontWeight: '500',
-    color: '#F2F2F7',
+    color: '#F5F5FA',
   },
   cardTitleCompleted: {
     textDecorationLine: 'line-through',
@@ -3989,7 +4183,7 @@ const styles = StyleSheet.create({
   },
   cardDescription: {
     fontSize: 13.5,
-    color: '#9A9AA6',
+    color: '#A4A4B2',
     marginTop: 5,
     lineHeight: 19,
   },
@@ -4003,11 +4197,11 @@ const styles = StyleSheet.create({
   },
   cardChecklistText: {
     fontSize: 14,
-    color: '#D1D1D8',
+    color: '#D8D8E2',
   },
   cardMeta: {
     fontSize: 12.5,
-    color: '#787885',
+    color: '#848494',
     marginTop: 6,
   },
   doingBadge: {
@@ -4031,51 +4225,54 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
   },
   chevronIcon: {
-    color: '#8E8E98',
+    color: '#9A9AA8',
     fontSize: 18,
   },
   deadlineBarTrack: {
     height: 4,
     width: '100%',
-    backgroundColor: '#22222E',
+    backgroundColor: 'rgba(34, 34, 46, 0.9)',
   },
   deadlineBarFill: {
     height: '100%',
   },
   emptyBox: {
     alignItems: 'center',
-    paddingVertical: 38,
-    backgroundColor: '#16161E',
+    paddingVertical: 42,
+    backgroundColor: 'rgba(23, 24, 36, 0.88)',
     borderRadius: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
   },
   emptyTitle: {
     fontSize: 16,
-    color: '#EAEAEF',
+    color: '#F2F2F7',
     fontWeight: '600',
   },
   emptySub: {
     fontSize: 13,
-    color: '#787885',
+    color: '#848494',
     marginTop: 6,
     textAlign: 'center',
     paddingHorizontal: 24,
   },
   scrollTopFloatingBtn: {
     position: 'absolute',
-    bottom: 84,
+    bottom: 86,
     alignSelf: 'center',
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: '#252530',
+    backgroundColor: 'rgba(37, 38, 52, 0.94)',
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: '#363645',
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    zIndex: 50,
   },
   scrollTopIcon: {
     fontSize: 18,
-    color: '#EAEAEF',
+    color: '#F4F4F8',
     marginTop: 2,
   },
   bottomFloatingWrapper: {
@@ -4083,34 +4280,37 @@ const styles = StyleSheet.create({
     bottom: 20,
     left: 20,
     right: 20,
+    zIndex: 50,
   },
   addReminderPill: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#1E1E26',
+    backgroundColor: 'rgba(28, 29, 40, 0.95)',
     borderRadius: 30,
     paddingLeft: 22,
     paddingRight: 12,
     paddingVertical: 12,
     borderWidth: 1,
-    borderColor: '#2B2B36',
+    borderColor: 'rgba(255, 255, 255, 0.10)',
   },
   addReminderPlaceholder: {
     fontSize: 16,
-    color: '#8E8E98',
+    color: '#9A9AA8',
   },
   micIcon: {
     fontSize: 16,
-    color: '#EAEAEF',
+    color: '#F4F4F8',
     marginRight: 6,
   },
   detailsMainCard: {
-    backgroundColor: '#16161E',
+    backgroundColor: 'rgba(23, 24, 36, 0.93)',
     borderRadius: 26,
     padding: 22,
     marginHorizontal: 14,
     marginTop: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.07)',
   },
   detailsTitleText: {
     fontSize: 20,
@@ -4120,13 +4320,13 @@ const styles = StyleSheet.create({
   },
   detailsDescText: {
     fontSize: 15,
-    color: '#B0B0B8',
+    color: '#B8B8C4',
     marginBottom: 12,
     lineHeight: 22,
   },
   detailsDivider: {
     height: 1,
-    backgroundColor: '#262630',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
     marginVertical: 14,
   },
   detailsCategoryRow: {
@@ -4139,7 +4339,7 @@ const styles = StyleSheet.create({
   },
   detailsCatName: {
     fontSize: 17,
-    color: '#EAEAEF',
+    color: '#F4F4F8',
   },
   detailsMetaTags: {
     flexDirection: 'row',
@@ -4148,12 +4348,12 @@ const styles = StyleSheet.create({
   },
   detailsMetaTagText: {
     fontSize: 12.5,
-    color: '#8E8E98',
+    color: '#9A9AA8',
     marginRight: 8,
   },
   createdDateLabel: {
     fontSize: 13,
-    color: '#9A9AA6',
+    color: '#A4A4B2',
     alignSelf: 'flex-end',
     marginRight: 24,
     marginTop: 14,
@@ -4163,16 +4363,17 @@ const styles = StyleSheet.create({
     bottom: 20,
     left: 20,
     right: 20,
+    zIndex: 50,
   },
   bottomActionPill: {
     flexDirection: 'row',
     justifyContent: 'space-around',
-    backgroundColor: '#1E1E26',
+    backgroundColor: 'rgba(28, 29, 40, 0.96)',
     borderRadius: 32,
     paddingVertical: 12,
     paddingHorizontal: 8,
     borderWidth: 1,
-    borderColor: '#2B2B36',
+    borderColor: 'rgba(255, 255, 255, 0.10)',
   },
   actionPillBtn: {
     alignItems: 'center',
@@ -4180,12 +4381,12 @@ const styles = StyleSheet.create({
   },
   actionPillIcon: {
     fontSize: 18,
-    color: '#EAEAEF',
+    color: '#F4F4F8',
     marginBottom: 3,
   },
   actionPillLabel: {
     fontSize: 11,
-    color: '#B0B0B8',
+    color: '#B8B8C4',
   },
   sheetModalContainer: {
     flex: 1,
@@ -4764,9 +4965,11 @@ const styles = StyleSheet.create({
   searchFiltersCard: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    backgroundColor: '#16161E',
+    backgroundColor: 'rgba(23, 24, 36, 0.92)',
     borderRadius: 22,
     padding: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
   },
   filterPillOutline: {
     borderWidth: 1,
@@ -4788,10 +4991,12 @@ const styles = StyleSheet.create({
   searchBottomBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#1E1E26',
+    backgroundColor: 'rgba(28, 29, 40, 0.95)',
     borderRadius: 30,
     paddingHorizontal: 20,
     paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.10)',
   },
   searchBottomInput: {
     flex: 1,
